@@ -13,7 +13,7 @@ import {
   RotateCw, Search, Layers, Sparkle, LayoutGrid,
   Box, ZoomIn, ZoomOut, Maximize2,
   History as HistoryIcon, Image as ImageIcon,
-  Grid, List, Sliders, Info, HelpCircle
+  Grid, List, Sliders
 } from 'lucide-react';
 
 /* =========================================================================
@@ -127,7 +127,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 };
 
 /* =========================================================================
-   2. DUAL PROMPT & HIERARCHICAL DANBOORU BROWSER WITH DESCRIPTIONS
+   2. EXTENSION-MATCHING PROMPT & DANBOORU BROWSER WORKSPACE
    ========================================================================= */
 const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   const {
@@ -155,12 +155,22 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   const subCategories = danbooru.getSubCategories(activeMacroCategory);
   const currentTags = danbooru.getTags(activeMacroCategory, activeSubCategory, pillSearchQuery);
 
-  const appendTag = (tag: string, target = activeTarget) => {
+  const handleTagAction = (tag: string, e: React.MouseEvent) => {
     const clean = tag.replace(/_/g, ' ');
-    if (target === 'positive') {
-      setPrompt(prompt.trim() ? `${prompt.trim()}, ${clean}` : clean);
+    let token = clean;
+
+    if (e.shiftKey) {
+      token = `(${clean}:1.2)`;
+    }
+
+    const targetBox = e.button === 2 ? (activeTarget === 'positive' ? 'negative' : 'positive') : activeTarget;
+
+    if (targetBox === 'positive') {
+      const current = prompt.trim();
+      setPrompt(current ? `${current}, ${token}` : token);
     } else {
-      setNegativePrompt(negativePrompt.trim() ? `${negativePrompt.trim()}, ${clean}` : clean);
+      const current = negativePrompt.trim();
+      setNegativePrompt(current ? `${current}, ${token}` : token);
     }
   };
 
@@ -178,7 +188,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   };
 
   return (
-    <div className="h-full flex flex-col bg-[#101216] select-none text-xs overflow-hidden">
+    <div className="h-full flex flex-col bg-[#101216] select-none text-xs overflow-hidden" onContextMenu={(e) => e.preventDefault()}>
       {/* Top Prompt Textboxes Area */}
       <div className="p-2.5 border-b border-[#252a35] bg-[#14161f] flex flex-col gap-2 shrink-0">
         <div className="flex gap-2 h-24">
@@ -192,7 +202,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             <PromptAutosuggestTextarea
               value={prompt}
               onChange={setPrompt}
-              placeholder="Type prompt here (Danbooru autocompletion active)..."
+              placeholder="Type positive prompt here..."
               target="positive"
             />
           </div>
@@ -207,7 +217,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             <PromptAutosuggestTextarea
               value={negativePrompt}
               onChange={setNegativePrompt}
-              placeholder="low quality, blurry, worst quality..."
+              placeholder="low quality, blurry..."
               target="negative"
             />
           </div>
@@ -238,7 +248,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         </div>
       </div>
 
-      {/* Hierarchical Danbooru Category & Subcategory Explorer */}
+      {/* Hierarchical Danbooru Tag Browser */}
       <div className="flex-1 flex flex-col min-h-0 bg-[#0e1014]">
         {/* Tier 1: Parent Categories */}
         <div className="flex gap-1 overflow-x-auto p-1.5 border-b border-[#252a35] scrollbar-none bg-[#12141a]">
@@ -249,18 +259,18 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                 setActiveMacroCategory(parent);
                 setActiveSubCategory('All');
               }}
-              className={`px-2.5 py-0.5 rounded text-[11px] whitespace-nowrap cursor-pointer transition ${
+              className={`px-3 py-1 rounded text-xs whitespace-nowrap cursor-pointer transition ${
                 activeMacroCategory === parent
-                  ? 'bg-indigo-600 text-white font-medium shadow-sm'
+                  ? 'bg-indigo-600 text-white font-semibold shadow-md'
                   : 'bg-[#1b1e26] text-gray-400 hover:text-gray-200'
               }`}
             >
-              {parent}
+              {parent} ({danbooru.getTags(parent, 'All', '', 10000).length})
             </button>
           ))}
         </div>
 
-        {/* Tier 2: Subcategories inside the Parent */}
+        {/* Tier 2: Subcategory Chips & Pinned Filter */}
         <div className="flex items-center gap-2 p-1.5 border-b border-[#252a35] bg-[#151821]">
           <div className="relative w-48">
             <Search className="w-3 h-3 absolute left-2 top-2 text-gray-400" />
@@ -268,36 +278,37 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
               type="text"
               value={pillSearchQuery}
               onChange={(e) => setPillSearchQuery(e.target.value)}
-              placeholder="Filter tags in view..."
+              placeholder="Filter category tags..."
               className="w-full bg-[#1b1e26] border border-[#2b2f3a] rounded pl-7 pr-2 py-0.5 text-xs text-gray-200 outline-none focus:border-indigo-500"
             />
           </div>
 
           <div className="flex-1 flex gap-1 overflow-x-auto scrollbar-none">
-            {subCategories.map((sub) => (
-              <button
-                key={sub}
-                onClick={() => setActiveSubCategory(sub)}
-                className={`px-2 py-0.5 rounded-full text-[10px] whitespace-nowrap cursor-pointer transition ${
-                  activeSubCategory === sub
-                    ? 'bg-indigo-950 text-indigo-300 border border-indigo-500'
-                    : 'bg-[#1c202a] text-gray-400 hover:text-gray-200 border border-[#2b2f3a]'
-                }`}
-              >
-                {sub}
-              </button>
-            ))}
+            {subCategories.map((sub) => {
+              const subCount = sub === 'All'
+                ? danbooru.getTags(activeMacroCategory, 'All', '', 10000).length
+                : danbooru.getTags(activeMacroCategory, sub, '', 10000).length;
+              return (
+                <button
+                  key={sub}
+                  onClick={() => setActiveSubCategory(sub)}
+                  className={`px-2.5 py-0.5 rounded-full text-[11px] whitespace-nowrap cursor-pointer transition ${
+                    activeSubCategory === sub
+                      ? 'bg-indigo-600 text-white font-medium border border-indigo-400'
+                      : 'bg-[#1c202a] text-gray-400 hover:text-gray-200 border border-[#2b2f3a]'
+                  }`}
+                >
+                  {sub} ({subCount})
+                </button>
+              );
+            })}
           </div>
-
-          <span className="text-[10px] text-gray-500 font-mono whitespace-nowrap">
-            Target: <b className={activeTarget === 'positive' ? 'text-indigo-400' : 'text-rose-400'}>{activeTarget}</b>
-          </span>
         </div>
 
-        {/* Tier 3: Tags Belonging to Current Subcategory */}
+        {/* Tier 3: Tag Badges with `+ tag` Prefix */}
         <div className="flex-1 p-2 overflow-y-auto content-start flex flex-wrap gap-1.5">
           {currentTags.length === 0 ? (
-            <span className="text-gray-600 m-auto text-xs">No tags found under {activeMacroCategory} → {activeSubCategory}.</span>
+            <span className="text-gray-600 m-auto text-xs">No tags found under this subcategory.</span>
           ) : (
             currentTags.map((tag) => {
               const count = danbooru.getPostCount(tag);
@@ -306,13 +317,14 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                   key={tag}
                   onMouseEnter={(e) => handleTagHover(e, tag)}
                   onMouseLeave={() => setHoverDetail(null)}
-                  onClick={() => appendTag(tag, activeTarget)}
+                  onClick={(e) => handleTagAction(tag, e)}
                   onContextMenu={(e) => {
                     e.preventDefault();
-                    appendTag(tag, activeTarget === 'positive' ? 'negative' : 'positive');
+                    handleTagAction(tag, e);
                   }}
-                  className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#181a24] border border-[#2a2e3d] text-gray-300 hover:border-indigo-500 hover:text-white cursor-pointer transition text-xs select-none"
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#181a24] border border-[#2a2e3d] text-gray-300 hover:border-indigo-500 hover:text-white cursor-pointer transition text-xs select-none"
                 >
+                  <span className="text-indigo-400 font-mono">+</span>
                   <span>{tag.replace(/_/g, ' ')}</span>
                   {count && (
                     <span className="text-[9px] font-mono text-gray-500 bg-[#0f1117] px-1 py-0.2 rounded">
@@ -326,26 +338,29 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         </div>
       </div>
 
-      {/* Floating Danbooru Wiki Definition Tooltip */}
+      {/* Floating Extension-Style Wiki Popover */}
       {hoverDetail && tooltipPos && (
         <div
-          className="fixed z-50 w-80 bg-[#161822] border border-[#2e3344] rounded-lg shadow-2xl p-3 text-xs text-gray-200 pointer-events-none"
-          style={{ left: Math.min(tooltipPos.x, window.innerWidth - 330), top: Math.min(tooltipPos.y, window.innerHeight - 150) }}
+          className="fixed z-50 w-72 bg-[#181a24] border border-[#2e3344] rounded-lg shadow-2xl p-3 text-xs text-gray-200 pointer-events-none"
+          style={{ left: Math.min(tooltipPos.x, window.innerWidth - 300), top: Math.min(tooltipPos.y, window.innerHeight - 180) }}
         >
-          <div className="flex justify-between items-center border-b border-[#2e3344] pb-1 mb-1.5">
-            <span className="font-bold text-indigo-300 text-sm">{hoverDetail.tag.replace(/_/g, ' ')}</span>
+          <div className="font-bold text-sm text-gray-100 mb-1">{hoverDetail.tag.replace(/_/g, ' ')}</div>
+          <div className="flex items-center gap-1.5 mb-2">
+            <span className="text-[10px] bg-[#222634] text-indigo-300 px-1.5 py-0.5 rounded font-mono">{hoverDetail.subCategory}</span>
             {hoverDetail.postCount && (
-              <span className="text-[10px] text-gray-400 font-mono">
+              <span className="text-[10px] bg-black/40 text-gray-400 px-1.5 py-0.5 rounded font-mono">
                 {hoverDetail.postCount.toLocaleString()} posts
               </span>
             )}
           </div>
-          <div className="text-[10px] text-gray-400 mb-1.5 font-mono">
-            <span>{hoverDetail.parentCategory}</span> &gt; <span>{hoverDetail.subCategory}</span>
-          </div>
-          <p className="text-[11px] text-gray-300 leading-relaxed max-h-24 overflow-y-auto">
-            {hoverDetail.description || 'No wiki definition available for this tag.'}
+          <p className="text-[11px] text-gray-300 leading-relaxed mb-3 max-h-24 overflow-y-auto">
+            {hoverDetail.description || 'No wiki definition available.'}
           </p>
+          <div className="text-[9px] text-gray-400 border-t border-[#252a35] pt-1.5 flex flex-col gap-0.5 font-mono">
+            <span><b>Click:</b> Add to Active</span>
+            <span><b>Shift+Click:</b> (1.2x weight)</span>
+            <span><b>Right-Click:</b> Negative Tray</span>
+          </div>
         </div>
       )}
     </div>
@@ -353,7 +368,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 };
 
 /* =========================================================================
-   3. EXTRA NETWORKS (LoRAs, EMBEDDINGS, WILDCARDS)
+   3. EXTRA NETWORKS PANEL (Cards & List Modes with Images & Metadata)
    ========================================================================= */
 const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
   const { lorasList, embeddingsList, wildcardsList, loadAssets, prompt, setPrompt } = useAppStore();
@@ -406,7 +421,7 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
           <button
             onClick={() => setViewMode(viewMode === 'cards' ? 'list' : 'cards')}
             className="p-1 hover:bg-[#202430] text-gray-300 rounded cursor-pointer"
-            title="Toggle Card / List View"
+            title="Toggle View"
           >
             {viewMode === 'cards' ? <List className="w-3.5 h-3.5" /> : <Grid className="w-3.5 h-3.5" />}
           </button>
@@ -916,7 +931,7 @@ const ParamsPanel: React.FC<IDockviewPanelProps> = () => {
 };
 
 /* =========================================================================
-   9. WORKSPACE CONTAINER WITH ZOOM SLIDER & RESIZABLE DOCKVIEW
+   9. WORKSPACE CONTAINER
    ========================================================================= */
 const components = {
   params: ParamsPanel,
@@ -938,7 +953,7 @@ export const Workspace: React.FC = () => {
   const isDraggingTrigger = useRef(false);
   const dragTriggerOffset = useRef({ x: 0, y: 0 });
 
-  const [bottomHeight, setBottomHeight] = useState(320);
+  const [bottomHeight, setBottomHeight] = useState(340);
   const isResizingBottom = useRef(false);
 
   const onReady = (event: DockviewReadyEvent) => {
@@ -1010,7 +1025,6 @@ export const Workspace: React.FC = () => {
       className="w-screen h-screen flex flex-col bg-[#0f1115] overflow-hidden"
       style={{ zoom: `${uiScale}%` }}
     >
-      {/* Top Header Bar with Workspace UI Scale Slider */}
       {!isTopBarCollapsed ? (
         <div className="h-9 bg-[#13151b] border-b border-[#252a35] px-3 flex items-center justify-between select-none shrink-0 z-30">
           <div className="flex items-center gap-2">
@@ -1024,7 +1038,6 @@ export const Workspace: React.FC = () => {
             <span className="font-semibold text-xs text-gray-200">SwarmCanvas</span>
           </div>
 
-          {/* Center: Interactive Scale Slider */}
           <div className="flex items-center gap-2 bg-[#181b24] border border-[#2b2f3a] px-2.5 py-0.5 rounded-md">
             <Sliders className="w-3 h-3 text-gray-400" />
             <span className="text-[10px] text-gray-400 font-mono">UI Scale:</span>
@@ -1040,7 +1053,6 @@ export const Workspace: React.FC = () => {
             <span className="text-[10px] text-indigo-400 font-mono w-8 text-right">{uiScale}%</span>
           </div>
 
-          {/* Right: Add Section (+) Dropdown */}
           <div className="relative">
             <button
               onClick={() => setShowAddMenu(!showAddMenu)}
@@ -1091,18 +1103,15 @@ export const Workspace: React.FC = () => {
         </div>
       )}
 
-      {/* Top Grid Area (Dockview) */}
       <div className="flex-1 w-full min-h-0">
         <DockviewReact components={components} onReady={onReady} className="dockview-theme-dark h-full w-full" />
       </div>
 
-      {/* Full-Width Horizontal Resizer Handle */}
       <div
         onMouseDown={() => (isResizingBottom.current = true)}
         className="h-1.5 w-full bg-[#181b24] hover:bg-indigo-500 cursor-row-resize shrink-0 transition-colors z-20 border-t border-[#252a35]"
       />
 
-      {/* Full-Width Independent Bottom Section */}
       <div style={{ height: `${bottomHeight}px` }} className="w-full shrink-0 flex flex-col bg-[#0f1115]">
         <PromptPillsPanel
           api={{} as any}
