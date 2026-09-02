@@ -37,39 +37,64 @@ export async function getSession(): Promise<string> {
       return activeSessionId;
     }
   } catch (err) {
-    console.error('[SwarmClient] Failed to establish Swarm session:', err);
+    console.error('[SwarmClient] Session failed:', err);
   }
   return '';
 }
 
-function parseFileList(data: any): string[] {
-  if (data?.files && Array.isArray(data.files)) {
-    return data.files.map((item: any) => (typeof item === 'string' ? item : item.data || item.name || item));
-  }
-  return [];
-}
-
-async function listBySubtype(subtype: string, path = '', depth = 10): Promise<string[]> {
-  try {
-    const session = await getSession();
-    const res = await fetch('/API/ListModels', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: session, path, depth, subtype })
-    });
-    return parseFileList(await res.json());
-  } catch {
-    return [];
-  }
-}
-
 export const swarmApi = {
-  listModels: () => listBySubtype('Stable-Diffusion'),
-  listVAEs: async () => ['Automatic', 'None', ...(await listBySubtype('VAE'))],
-  listLoRAs: () => listBySubtype('LoRA'),
-  listEmbeddings: () => listBySubtype('Embedding'),
-  listTextEncoders: async () => ['Automatic', ...(await listBySubtype('Clip'))],
-  listWildcards: () => listBySubtype('Wildcards'),
+  async listModelsDetailed(subtype: string): Promise<{ name: string; previewUrl?: string; description?: string }[]> {
+    try {
+      const session = await getSession();
+      const res = await fetch('/API/ListModels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: session, path: '', depth: 10, subtype })
+      });
+      const data = await res.json();
+      if (data?.files && Array.isArray(data.files)) {
+        return data.files.map((item: any) => {
+          if (typeof item === 'string') return { name: item };
+          const name = item.data || item.name || String(item);
+          let preview = item.preview_image || item.image || item.thumbnail;
+          if (preview && !preview.startsWith('http') && !preview.startsWith('data:')) {
+            preview = `/${preview.replace(/^\/+/, '')}`;
+          }
+          return { name, previewUrl: preview, description: item.description };
+        });
+      }
+      return [];
+    } catch {
+      return [];
+    }
+  },
+
+  async listVAEs(): Promise<string[]> {
+    try {
+      const detailed = await this.listModelsDetailed('VAE');
+      return ['Automatic', 'None', ...detailed.map((d) => d.name)];
+    } catch {
+      return ['Automatic', 'None'];
+    }
+  },
+
+  async listTextEncoders(): Promise<string[]> {
+    try {
+      const detailed = await this.listModelsDetailed('Clip');
+      return ['Automatic', ...detailed.map((d) => d.name)];
+    } catch {
+      return ['Automatic'];
+    }
+  },
+
+  async listWildcards(): Promise<string[]> {
+    try {
+      const detailed = await this.listModelsDetailed('Wildcards');
+      return detailed.map((d) => d.name);
+    } catch {
+      return [];
+    }
+  },
 
   generateWS(
     params: GenParams,
