@@ -1,11 +1,15 @@
+// src/store/useAppStore.ts
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import { swarmApi, ProgressPayload } from '../api/swarmClient';
 import { danbooru } from '../api/danbooruService';
+import { civitaiService } from '../api/civitaiService';
 
 export interface ModelItem {
   name: string;
   previewUrl?: string;
   description?: string;
+  triggerWords?: string[];
 }
 
 export interface ControlNetUnit {
@@ -51,6 +55,34 @@ export interface HistoryItem {
   createdAt: string;
 }
 
+export interface AppSettings {
+  accentColor: 'indigo' | 'purple' | 'emerald' | 'rose' | 'amber' | 'cyan';
+  tagClickWeightStep: number;
+  showTagPostCounts: boolean;
+  showTagPlusPrefix: boolean;
+  useUnderscores: boolean;
+  autoInjectLoraTrigger: boolean;
+  defaultLoraWeight: number;
+
+  activePreset: 'Default' | 'Prompt Engineer' | 'Studio Canvas' | 'Multi-ControlNet';
+  bottomPanelHeight: number;
+  preservePromptsOnReload: boolean;
+  randomizeSeedOnGen: boolean;
+  maxHistoryCount: number;
+  autoSaveLayout: boolean;
+
+  sectionScales: {
+    pills: number;
+    params: number;
+    extranetworks: number;
+    preview: number;
+    controlnet: number;
+    adetailer: number;
+    history: number;
+    imagesearch: number;
+  };
+}
+
 export const SWARM_VALID_SAMPLERS = [
   { id: 'euler', label: 'Euler' },
   { id: 'euler_ancestral', label: 'Euler Ancestral' },
@@ -68,22 +100,10 @@ export const SWARM_VALID_SAMPLERS = [
 ];
 
 export const SWARM_VALID_SCHEDULERS = [
-  'normal',
-  'karras',
-  'exponential',
-  'sgm_uniform',
-  'simple',
-  'ddim_uniform',
-  'turbo',
-  'align_your_steps'
+  'normal', 'karras', 'exponential', 'sgm_uniform', 'simple', 'ddim_uniform', 'turbo', 'align_your_steps'
 ];
 
 interface AppState {
-  // Global View Scaling
-  uiScale: number;
-  setUiScale: (s: number) => void;
-
-  // Generation Core Params
   prompt: string;
   negativePrompt: string;
   model: string;
@@ -104,11 +124,9 @@ interface AppState {
   sampler: string;
   scheduler: string;
 
-  // Addons & Multi-Units
   controlNetUnits: ControlNetUnit[];
   aDetailerUnits: ADetailerUnit[];
 
-  // Progress & Execution State
   currentStep: number;
   maxSteps: number;
   progressPercent: number;
@@ -124,313 +142,444 @@ interface AppState {
     eta: number | null;
   };
 
-  // Gallery History
-  history: HistoryItem[];
+  // A/B Split-Slider State
+  comparisonImage: string | null;
+  isComparing: boolean;
+  compareSplit: number; // 0 to 100 percentage
+  setIsComparing: (b: boolean) => void;
+  setComparisonImage: (url: string | null) => void;
+  setCompareSplit: (n: number) => void;
 
-  // Danbooru Categories & Filter Search
+  history: HistoryItem[];
   activeMacroCategory: string;
   activeSubCategory: string;
   pillSearchQuery: string;
 
-  // Actions
+  settings: AppSettings;
+  updateSettings: (partial: Partial<AppSettings>) => void;
+  setSectionScale: (section: keyof AppSettings['sectionScales'], scale: number) => void;
+
   setPrompt: (p: string) => void;
   setNegativePrompt: (np: string) => void;
   setModel: (m: string) => void;
   setParams: (partial: Partial<AppState>) => void;
+  useGenerationParams: (item: HistoryItem) => void;
   updateControlNet: (id: string, partial: Partial<ControlNetUnit>) => void;
   updateADetailer: (id: string, partial: Partial<ADetailerUnit>) => void;
   setActiveMacroCategory: (c: string) => void;
   setActiveSubCategory: (s: string) => void;
   setPillSearchQuery: (q: string) => void;
+
   loadAssets: () => Promise<void>;
+  syncCivitaiMetadata: (
+    category: 'all' | 'models' | 'loras' | 'embeddings',
+    onProgress?: (current: number, total: number, name: string) => void
+  ) => Promise<void>;
   enqueueAndProcess: () => Promise<void>;
   cancelGeneration: () => void;
 }
 
-let timerInterval: ReturnType<typeof setInterval> | null = null;
+let timerInterval: any = null;
 
-export const useAppStore = create<AppState>((set, get) => ({
-  uiScale: Number(localStorage.getItem('swarm_ui_scale') || 100),
-  setUiScale: (scale: number) => {
-    localStorage.setItem('swarm_ui_scale', String(scale));
-    set({ uiScale: scale });
-  },
+export const useAppStore = create<AppState>()(
+  persist(
+    (set, get) => ({
+      prompt: '',
+      negativePrompt: 'worst quality, low quality, blurry, mutated, bad anatomy',
+      model: '',
+      vae: 'Automatic',
+      textEncoder: 'Automatic',
+      modelsList: [],
+      vaesList: ['Automatic', 'None'],
+      textEncodersList: ['Automatic'],
+      lorasList: [],
+      embeddingsList: [],
+      wildcardsList: [],
 
-  prompt: '',
-  negativePrompt: 'worst quality, low quality, blurry, mutated, bad anatomy',
-  model: '',
-  vae: 'Automatic',
-  textEncoder: 'Automatic',
-  modelsList: [],
-  vaesList: ['Automatic', 'None'],
-  textEncodersList: ['Automatic'],
-  lorasList: [],
-  embeddingsList: [],
-  wildcardsList: [],
+      steps: 26,
+      cfgScale: 5.0,
+      width: 1024,
+      height: 1024,
+      seed: -1,
+      sampler: 'euler',
+      scheduler: 'normal',
 
-  steps: 26,
-  cfgScale: 5.0,
-  width: 1024,
-  height: 1024,
-  seed: -1,
-  sampler: 'euler',
-  scheduler: 'normal',
+      controlNetUnits: [
+        { id: '1', enabled: false, preprocessor: 'canny', model: 'controlnet-canny-sdxl', weight: 1.0, guidanceStart: 0, guidanceEnd: 1, controlMode: 'balanced', image: null },
+        { id: '2', enabled: false, preprocessor: 'depth', model: 'controlnet-depth-sdxl', weight: 1.0, guidanceStart: 0, guidanceEnd: 1, controlMode: 'balanced', image: null },
+        { id: '3', enabled: false, preprocessor: 'openpose', model: 'controlnet-openpose-sdxl', weight: 1.0, guidanceStart: 0, guidanceEnd: 1, controlMode: 'balanced', image: null }
+      ],
 
-  controlNetUnits: [
-    {
-      id: '1',
-      enabled: false,
-      preprocessor: 'canny',
-      model: 'controlnet-canny-sdxl',
-      weight: 1.0,
-      guidanceStart: 0,
-      guidanceEnd: 1,
-      controlMode: 'balanced',
-      image: null
-    },
-    {
-      id: '2',
-      enabled: false,
-      preprocessor: 'depth',
-      model: 'controlnet-depth-sdxl',
-      weight: 1.0,
-      guidanceStart: 0,
-      guidanceEnd: 1,
-      controlMode: 'balanced',
-      image: null
-    },
-    {
-      id: '3',
-      enabled: false,
-      preprocessor: 'openpose',
-      model: 'controlnet-openpose-sdxl',
-      weight: 1.0,
-      guidanceStart: 0,
-      guidanceEnd: 1,
-      controlMode: 'balanced',
-      image: null
-    }
-  ],
+      aDetailerUnits: [
+        { id: '1', enabled: false, model: 'face_yolov8n.pt', confidence: 0.3, maskBlur: 4, denoiseStrength: 0.4, maskDilation: 4, inpaintWidth: 512, inpaintHeight: 512, prompt: '' },
+        { id: '2', enabled: false, model: 'hand_yolov8n.pt', confidence: 0.4, maskBlur: 4, denoiseStrength: 0.4, maskDilation: 4, inpaintWidth: 512, inpaintHeight: 512, prompt: '' }
+      ],
 
-  aDetailerUnits: [
-    {
-      id: '1',
-      enabled: false,
-      model: 'face_yolov8n.pt',
-      confidence: 0.3,
-      maskBlur: 4,
-      denoiseStrength: 0.4,
-      maskDilation: 4,
-      inpaintWidth: 512,
-      inpaintHeight: 512,
-      prompt: ''
-    },
-    {
-      id: '2',
-      enabled: false,
-      model: 'hand_yolov8n.pt',
-      confidence: 0.4,
-      maskBlur: 4,
-      denoiseStrength: 0.4,
-      maskDilation: 4,
-      inpaintWidth: 512,
-      inpaintHeight: 512,
-      prompt: ''
-    }
-  ],
-
-  currentStep: 0,
-  maxSteps: 26,
-  progressPercent: 0,
-  isGenerating: false,
-  activeImage: null,
-  livePreview: null,
-  metrics: {
-    stage: 'Idle',
-    modelLoadTime: null,
-    samplingTime: null,
-    totalTime: 0,
-    speed: null,
-    eta: null
-  },
-
-  history: [],
-  activeMacroCategory: 'All',
-  activeSubCategory: 'All',
-  pillSearchQuery: '',
-
-  setPrompt: (prompt) => set({ prompt }),
-  setNegativePrompt: (negativePrompt) => set({ negativePrompt }),
-  setModel: (model) => set({ model }),
-  setParams: (partial) => set(partial),
-
-  updateControlNet: (id, partial) =>
-    set((s) => ({
-      controlNetUnits: s.controlNetUnits.map((u) => (u.id === id ? { ...u, ...partial } : u))
-    })),
-
-  updateADetailer: (id, partial) =>
-    set((s) => ({
-      aDetailerUnits: s.aDetailerUnits.map((u) => (u.id === id ? { ...u, ...partial } : u))
-    })),
-
-  setActiveMacroCategory: (activeMacroCategory) => set({ activeMacroCategory, activeSubCategory: 'All' }),
-  setActiveSubCategory: (activeSubCategory) => set({ activeSubCategory }),
-  setPillSearchQuery: (pillSearchQuery) => set({ pillSearchQuery }),
-
-  loadAssets: async () => {
-    await danbooru.init();
-    const [rawModels, vaes, rawLoras, rawEmbeddings, textEncoders, wildcards] = await Promise.all([
-      swarmApi.listModelsDetailed('Stable-Diffusion'),
-      swarmApi.listVAEs(),
-      swarmApi.listModelsDetailed('LoRA'),
-      swarmApi.listModelsDetailed('Embedding'),
-      swarmApi.listTextEncoders(),
-      swarmApi.listWildcards()
-    ]);
-
-    set({
-      modelsList: rawModels,
-      model: get().model || (rawModels[0]?.name ?? ''),
-      vaesList: vaes,
-      lorasList: rawLoras,
-      embeddingsList: rawEmbeddings,
-      textEncodersList: textEncoders,
-      wildcardsList: wildcards
-    });
-  },
-
-  cancelGeneration: () => {
-    if (timerInterval) clearInterval(timerInterval);
-    set({ isGenerating: false, livePreview: null });
-  },
-
-  enqueueAndProcess: async () => {
-    const s = get();
-    if (s.isGenerating || !s.model) return;
-
-    if (timerInterval) clearInterval(timerInterval);
-    const startPerf = performance.now();
-    let sampleStartPerf: number | null = null;
-    let modelLoadSeconds: number | null = null;
-
-    set({
-      isGenerating: true,
       currentStep: 0,
-      maxSteps: s.steps,
+      maxSteps: 26,
       progressPercent: 0,
+      isGenerating: false,
+      activeImage: null,
       livePreview: null,
       metrics: {
-        stage: 'Loading Model',
+        stage: 'Idle',
         modelLoadTime: null,
         samplingTime: null,
         totalTime: 0,
         speed: null,
         eta: null
-      }
-    });
+      },
 
-    timerInterval = setInterval(() => {
-      const now = performance.now();
-      const totalElapsed = Number(((now - startPerf) / 1000).toFixed(1));
-      let sampleElapsed: number | null = null;
-      let speed: number | null = null;
-      let eta: number | null = null;
+      comparisonImage: null,
+      isComparing: false,
+      compareSplit: 50,
+      setIsComparing: (isComparing) => set({ isComparing }),
+      setComparisonImage: (comparisonImage) => set({ comparisonImage, isComparing: !!comparisonImage }),
+      setCompareSplit: (compareSplit) => set({ compareSplit }),
 
-      if (sampleStartPerf) {
-        sampleElapsed = Number(((now - sampleStartPerf) / 1000).toFixed(1));
-        const curStep = get().currentStep;
-        if (sampleElapsed > 0.2 && curStep > 0) {
-          speed = Number((curStep / sampleElapsed).toFixed(2));
-          const remSteps = Math.max(0, get().maxSteps - curStep);
-          eta = Math.max(0, Number((remSteps / (speed || 1)).toFixed(1)));
+      history: [],
+      activeMacroCategory: 'All',
+      activeSubCategory: 'All',
+      pillSearchQuery: '',
+
+      settings: {
+        accentColor: 'indigo',
+        tagClickWeightStep: 0.2,
+        showTagPostCounts: true,
+        showTagPlusPrefix: true,
+        useUnderscores: false,
+        autoInjectLoraTrigger: true,
+        defaultLoraWeight: 1.0,
+
+        activePreset: 'Default',
+        bottomPanelHeight: 340,
+        preservePromptsOnReload: true,
+        randomizeSeedOnGen: true,
+        maxHistoryCount: 50,
+        autoSaveLayout: true,
+
+        sectionScales: {
+          pills: 100,
+          params: 100,
+          extranetworks: 100,
+          preview: 100,
+          controlnet: 100,
+          adetailer: 100,
+          history: 100,
+          imagesearch: 100
         }
-      }
+      },
 
-      set({
-        metrics: {
-          ...get().metrics,
-          totalTime: totalElapsed,
-          samplingTime: sampleElapsed,
-          speed,
-          eta
+      updateSettings: (partial) =>
+        set((s) => ({ settings: { ...s.settings, ...partial } })),
+
+      setSectionScale: (section, scale) =>
+        set((s) => ({
+          settings: {
+            ...s.settings,
+            sectionScales: { ...s.settings.sectionScales, [section]: scale }
+          }
+        })),
+
+      setPrompt: (prompt) => set({ prompt }),
+      setNegativePrompt: (negativePrompt) => set({ negativePrompt }),
+      setModel: (model) => set({ model }),
+      setParams: (partial) => set(partial),
+
+      useGenerationParams: (item) => {
+        set({
+          prompt: item.prompt,
+          negativePrompt: item.negativePrompt,
+          model: item.params.model || get().model,
+          sampler: item.params.sampler || get().sampler,
+          scheduler: item.params.scheduler || get().scheduler,
+          steps: item.params.steps || get().steps,
+          cfgScale: item.params.cfgScale || get().cfgScale,
+          seed: item.params.seed !== undefined ? item.params.seed : get().seed,
+          width: item.params.width || get().width,
+          height: item.params.height || get().height
+        });
+      },
+
+      updateControlNet: (id, partial) =>
+        set((s) => ({
+          controlNetUnits: s.controlNetUnits.map((u) => (u.id === id ? { ...u, ...partial } : u))
+        })),
+
+      updateADetailer: (id, partial) =>
+        set((s) => ({
+          aDetailerUnits: s.aDetailerUnits.map((u) => (u.id === id ? { ...u, ...partial } : u))
+        })),
+
+      setActiveMacroCategory: (activeMacroCategory) => set({ activeMacroCategory, activeSubCategory: 'All' }),
+      setActiveSubCategory: (activeSubCategory) => set({ activeSubCategory }),
+      setPillSearchQuery: (pillSearchQuery) => set({ pillSearchQuery }),
+
+      loadAssets: async () => {
+        await danbooru.init();
+        const [rawModels, vaes, rawLoras, rawEmbeddings, textEncoders, wildcards] = await Promise.all([
+          swarmApi.listModelsDetailed('Stable-Diffusion'),
+          swarmApi.listVAEs(),
+          swarmApi.listModelsDetailed('LoRA'),
+          swarmApi.listModelsDetailed('Embedding'),
+          swarmApi.listTextEncoders(),
+          swarmApi.listWildcards()
+        ]);
+
+        // Merge existing cached preview URLs / trigger words if available
+        const mergeWithExisting = (newList: ModelItem[], existingList: ModelItem[]) => {
+          const map = new Map(existingList.map((i) => [i.name, i]));
+          return newList.map((item) => {
+            const cached = map.get(item.name);
+            return {
+              ...item,
+              previewUrl: item.previewUrl || cached?.previewUrl,
+              triggerWords: item.triggerWords || cached?.triggerWords,
+              description: item.description || cached?.description
+            };
+          });
+        };
+
+        set({
+          modelsList: mergeWithExisting(rawModels, get().modelsList),
+          model: get().model || (rawModels[0]?.name ?? ''),
+          vaesList: vaes,
+          lorasList: mergeWithExisting(rawLoras, get().lorasList),
+          embeddingsList: mergeWithExisting(rawEmbeddings, get().embeddingsList),
+          textEncodersList: textEncoders,
+          wildcardsList: wildcards
+        });
+      },
+
+      syncCivitaiMetadata: async (category, onProgress) => {
+        const s = get();
+        const targets: { type: 'model' | 'lora' | 'embedding'; item: ModelItem; idx: number }[] = [];
+
+        if (category === 'all' || category === 'models') {
+          s.modelsList.forEach((m, idx) => {
+            if (!m.previewUrl) targets.push({ type: 'model', item: m, idx });
+          });
         }
-      });
-    }, 100);
+        if (category === 'all' || category === 'loras') {
+          s.lorasList.forEach((l, idx) => {
+            if (!l.previewUrl) targets.push({ type: 'lora', item: l, idx });
+          });
+        }
+        if (category === 'all' || category === 'embeddings') {
+          s.embeddingsList.forEach((e, idx) => {
+            if (!e.previewUrl) targets.push({ type: 'embedding', item: e, idx });
+          });
+        }
 
-    swarmApi.generateWS(
-      {
-        prompt: s.prompt,
-        negativeprompt: s.negativePrompt,
+        const total = targets.length;
+        if (total === 0) return;
+
+        for (let i = 0; i < total; i++) {
+          const target = targets[i];
+          if (onProgress) onProgress(i + 1, total, target.item.name);
+
+          const meta = await civitaiService.fetchMetadata(target.item.name, target.type);
+          if (meta) {
+            if (target.type === 'model') {
+              const updated = [...get().modelsList];
+              updated[target.idx] = {
+                ...updated[target.idx],
+                previewUrl: meta.previewUrl || updated[target.idx].previewUrl,
+                triggerWords: meta.triggerWords,
+                description: meta.description || updated[target.idx].description
+              };
+              set({ modelsList: updated });
+            } else if (target.type === 'lora') {
+              const updated = [...get().lorasList];
+              updated[target.idx] = {
+                ...updated[target.idx],
+                previewUrl: meta.previewUrl || updated[target.idx].previewUrl,
+                triggerWords: meta.triggerWords,
+                description: meta.description || updated[target.idx].description
+              };
+              set({ lorasList: updated });
+            } else if (target.type === 'embedding') {
+              const updated = [...get().embeddingsList];
+              updated[target.idx] = {
+                ...updated[target.idx],
+                previewUrl: meta.previewUrl || updated[target.idx].previewUrl,
+                triggerWords: meta.triggerWords,
+                description: meta.description || updated[target.idx].description
+              };
+              set({ embeddingsList: updated });
+            }
+          }
+          // Small throttling delay to be respectful to Civitai public API
+          await new Promise((resolve) => setTimeout(resolve, 350));
+        }
+      },
+
+      cancelGeneration: () => {
+        if (timerInterval) clearInterval(timerInterval);
+        set({ isGenerating: false, livePreview: null });
+      },
+
+      enqueueAndProcess: async () => {
+        const s = get();
+        if (s.isGenerating || !s.model) return;
+
+        if (timerInterval) clearInterval(timerInterval);
+        const startPerf = performance.now();
+        let sampleStartPerf: number | null = null;
+        let modelLoadSeconds: number | null = null;
+
+        const effectiveSeed = s.settings.randomizeSeedOnGen && s.seed === -1
+          ? Math.floor(Math.random() * 2147483647)
+          : s.seed;
+
+        set({
+          isGenerating: true,
+          currentStep: 0,
+          maxSteps: s.steps,
+          progressPercent: 0,
+          livePreview: null,
+          metrics: {
+            stage: 'Loading Model',
+            modelLoadTime: null,
+            samplingTime: null,
+            totalTime: 0,
+            speed: null,
+            eta: null
+          }
+        });
+
+        timerInterval = setInterval(() => {
+          const now = performance.now();
+          const totalElapsed = Number(((now - startPerf) / 1000).toFixed(1));
+          let sampleElapsed: number | null = null;
+          let speed: number | null = null;
+          let eta: number | null = null;
+
+          if (sampleStartPerf) {
+            sampleElapsed = Number(((now - sampleStartPerf) / 1000).toFixed(1));
+            const curStep = get().currentStep;
+            if (sampleElapsed > 0.2 && curStep > 0) {
+              speed = Number((curStep / sampleElapsed).toFixed(2));
+              const remSteps = Math.max(0, get().maxSteps - curStep);
+              eta = Math.max(0, Number((remSteps / (speed || 1)).toFixed(1)));
+            }
+          }
+
+          set({
+            metrics: {
+              ...get().metrics,
+              totalTime: totalElapsed,
+              samplingTime: sampleElapsed,
+              speed,
+              eta
+            }
+          });
+        }, 100);
+
+        swarmApi.generateWS(
+          {
+            prompt: s.prompt,
+            negativeprompt: s.negativePrompt,
+            model: s.model,
+            vae: s.vae === 'Automatic' ? undefined : s.vae,
+            textencoder: s.textEncoder === 'Automatic' ? undefined : s.textEncoder,
+            steps: s.steps,
+            cfgscale: s.cfgScale,
+            width: s.width,
+            height: s.height,
+            seed: effectiveSeed,
+            sampler: s.sampler,
+            scheduler: s.scheduler
+          },
+          (progress: ProgressPayload) => {
+            const now = performance.now();
+            if (progress.step > 0 && sampleStartPerf === null) {
+              sampleStartPerf = now;
+              modelLoadSeconds = Number(((now - startPerf) / 1000).toFixed(2));
+            }
+
+            set({
+              currentStep: progress.step,
+              maxSteps: progress.maxSteps,
+              progressPercent: progress.percent,
+              livePreview: progress.previewUrl || get().livePreview,
+              metrics: {
+                ...get().metrics,
+                stage: progress.stage || (progress.step === 0 ? 'Loading Model' : 'Sampling'),
+                modelLoadTime: modelLoadSeconds
+              }
+            });
+          },
+          (imageUrls: string[]) => {
+            if (timerInterval) clearInterval(timerInterval);
+            const totalSec = Number(((performance.now() - startPerf) / 1000).toFixed(2));
+            const finalUrl = imageUrls[0] || null;
+
+            if (finalUrl) {
+              const histItem: HistoryItem = {
+                id: crypto.randomUUID(),
+                imageUrl: finalUrl,
+                prompt: s.prompt,
+                negativePrompt: s.negativePrompt,
+                params: {
+                  model: s.model,
+                  sampler: s.sampler,
+                  scheduler: s.scheduler,
+                  steps: s.steps,
+                  cfgScale: s.cfgScale,
+                  seed: effectiveSeed,
+                  width: s.width,
+                  height: s.height
+                },
+                createdAt: new Date().toLocaleTimeString()
+              };
+              set((state) => ({
+                history: [histItem, ...state.history].slice(0, state.settings.maxHistoryCount)
+              }));
+            }
+
+            set({
+              activeImage: finalUrl,
+              livePreview: null,
+              isGenerating: false,
+              progressPercent: 100,
+              metrics: { ...get().metrics, stage: 'Done', totalTime: totalSec, eta: 0 }
+            });
+          },
+          (err: string) => {
+            console.error('[AppStore] Generation failed:', err);
+            if (timerInterval) clearInterval(timerInterval);
+            set({ isGenerating: false, metrics: { ...get().metrics, stage: 'Failed' } });
+          }
+        );
+      }
+    }),
+    {
+      name: 'swarm_canvas_persisted_store',
+      storage: createJSONStorage(() => localStorage),
+      partialize: (s) => ({
+        prompt: s.settings.preservePromptsOnReload ? s.prompt : '',
+        negativePrompt: s.settings.preservePromptsOnReload ? s.negativePrompt : '',
         model: s.model,
-        vae: s.vae === 'Automatic' ? undefined : s.vae,
-        textencoder: s.textEncoder === 'Automatic' ? undefined : s.textEncoder,
+        vae: s.vae,
+        textEncoder: s.textEncoder,
         steps: s.steps,
-        cfgscale: s.cfgScale,
+        cfgScale: s.cfgScale,
         width: s.width,
         height: s.height,
         seed: s.seed,
         sampler: s.sampler,
-        scheduler: s.scheduler
-      },
-      (progress: ProgressPayload) => {
-        const now = performance.now();
-        if (progress.step > 0 && sampleStartPerf === null) {
-          sampleStartPerf = now;
-          modelLoadSeconds = Number(((now - startPerf) / 1000).toFixed(2));
-        }
-
-        set({
-          currentStep: progress.step,
-          maxSteps: progress.maxSteps,
-          progressPercent: progress.percent,
-          livePreview: progress.previewUrl || get().livePreview,
-          metrics: {
-            ...get().metrics,
-            stage: progress.stage || (progress.step === 0 ? 'Loading Model' : 'Sampling'),
-            modelLoadTime: modelLoadSeconds
-          }
-        });
-      },
-      (imageUrls: string[]) => {
-        if (timerInterval) clearInterval(timerInterval);
-        const totalSec = Number(((performance.now() - startPerf) / 1000).toFixed(2));
-        const finalUrl = imageUrls[0] || null;
-
-        if (finalUrl) {
-          const histItem: HistoryItem = {
-            id: crypto.randomUUID(),
-            imageUrl: finalUrl,
-            prompt: s.prompt,
-            negativePrompt: s.negativePrompt,
-            params: {
-              model: s.model,
-              sampler: s.sampler,
-              scheduler: s.scheduler,
-              steps: s.steps,
-              cfgScale: s.cfgScale,
-              seed: s.seed,
-              width: s.width,
-              height: s.height
-            },
-            createdAt: new Date().toLocaleTimeString()
-          };
-          set((state) => ({ history: [histItem, ...state.history] }));
-        }
-
-        set({
-          activeImage: finalUrl,
-          livePreview: null,
-          isGenerating: false,
-          progressPercent: 100,
-          metrics: { ...get().metrics, stage: 'Done', totalTime: totalSec, eta: 0 }
-        });
-      },
-      (err: string) => {
-        console.error('[AppStore] Generation failed:', err);
-        if (timerInterval) clearInterval(timerInterval);
-        set({ isGenerating: false, metrics: { ...get().metrics, stage: 'Failed' } });
-      }
-    );
-  }
-}));
+        scheduler: s.scheduler,
+        controlNetUnits: s.controlNetUnits,
+        aDetailerUnits: s.aDetailerUnits,
+        activeMacroCategory: s.activeMacroCategory,
+        activeSubCategory: s.activeSubCategory,
+        settings: s.settings,
+        modelsList: s.modelsList,
+        lorasList: s.lorasList,
+        embeddingsList: s.embeddingsList,
+        history: s.history.slice(0, 40)
+      })
+    }
+  )
+);

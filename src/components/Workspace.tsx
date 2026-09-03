@@ -1,3 +1,4 @@
+// src/components/Workspace.tsx
 import React, { useEffect, useState, useRef } from 'react';
 import {
   DockviewReact,
@@ -5,28 +6,41 @@ import {
   DockviewApi,
   IDockviewPanelProps
 } from 'dockview-react';
-import { useAppStore, SWARM_VALID_SAMPLERS, SWARM_VALID_SCHEDULERS, ModelItem } from '../store/useAppStore';
+import { useAppStore, SWARM_VALID_SAMPLERS, SWARM_VALID_SCHEDULERS, ModelItem, AppSettings, HistoryItem } from '../store/useAppStore';
 import { danbooru, TagDetail } from '../api/danbooruService';
 import { PromptAutosuggestTextarea } from './PromptAutosuggestTextarea';
+import { CustomContextMenu, ContextMenuItem } from './CustomContextMenu';
+import { ModelPlaceholder } from './ModelPlaceholder';
 import {
   Wand2, Plus, Clock, Cpu, Gauge,
   RotateCw, Search, Layers, Sparkle, LayoutGrid,
   Box, ZoomIn, ZoomOut, Maximize2,
   History as HistoryIcon, Image as ImageIcon,
-  Grid, List, Sliders
+  Grid, List, Sliders, ChevronLeft, ChevronRight,
+  Settings, Copy, Trash2, ExternalLink, Download, ArrowUpRight,
+  SplitSquareVertical, Globe, Check
 } from 'lucide-react';
 
 /* =========================================================================
-   1. VIEWPORT CANVAS WITH PAN & ZOOM
+   1. VIEWPORT CANVAS WITH A/B SPLIT-SLIDER & CONTEXT MENU
    ========================================================================= */
 const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
-  const { activeImage, livePreview, isGenerating, currentStep, maxSteps, progressPercent, metrics } = useAppStore();
+  const {
+    activeImage, livePreview, isGenerating, currentStep, maxSteps,
+    progressPercent, metrics, setParams, comparisonImage, isComparing,
+    compareSplit, setIsComparing, setComparisonImage, setCompareSplit, history
+  } = useAppStore();
+
   const displayImage = livePreview || activeImage;
 
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const dragStart = useRef({ x: 0, y: 0 });
+
+  const [isDraggingSlider, setIsDraggingSlider] = useState(false);
+  const canvasContainerRef = useRef<HTMLDivElement>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
 
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
@@ -35,6 +49,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
+    if (isDraggingSlider) return;
     if (e.button === 0 || e.button === 1) {
       setIsDragging(true);
       dragStart.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
@@ -42,38 +57,151 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
+    if (isDraggingSlider && canvasContainerRef.current) {
+      const rect = canvasContainerRef.current.getBoundingClientRect();
+      const relativeX = e.clientX - rect.left;
+      const pct = Math.max(0, Math.min(100, (relativeX / rect.width) * 100));
+      setCompareSplit(Math.round(pct));
+      return;
+    }
     if (isDragging) {
       setPan({ x: e.clientX - dragStart.current.x, y: e.clientY - dragStart.current.y });
     }
   };
 
-  const handleMouseUp = () => setIsDragging(false);
+  const handleMouseUp = () => {
+    setIsDragging(false);
+    setIsDraggingSlider(false);
+  };
+
+  const resetTransform = () => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  };
+
+  const handleViewportContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const items: ContextMenuItem[] = [
+      {
+        label: 'Reset Zoom & Center',
+        icon: <Maximize2 className="w-3.5 h-3.5" />,
+        action: resetTransform
+      }
+    ];
+
+    if (displayImage) {
+      items.push(
+        {
+          label: isComparing ? 'Exit A/B Comparison Mode' : 'Enter A/B Comparison Mode',
+          icon: <SplitSquareVertical className="w-3.5 h-3.5 text-indigo-400" />,
+          action: () => {
+            if (!isComparing && !comparisonImage && history.length > 0) {
+              setComparisonImage(history[0].imageUrl);
+            }
+            setIsComparing(!isComparing);
+          }
+        },
+        {
+          label: 'Open Full Image in New Tab',
+          icon: <ExternalLink className="w-3.5 h-3.5" />,
+          action: () => window.open(displayImage, '_blank')
+        },
+        {
+          label: 'Download Rendered PNG',
+          icon: <Download className="w-3.5 h-3.5" />,
+          action: () => {
+            const a = document.createElement('a');
+            a.href = displayImage;
+            a.download = `Swarm_${Date.now()}.png`;
+            a.click();
+          }
+        },
+        {
+          separator: true,
+          label: 'Clear Viewport Canvas',
+          icon: <Trash2 className="w-3.5 h-3.5 text-rose-400" />,
+          danger: true,
+          action: () => setParams({ activeImage: null, livePreview: null })
+        }
+      );
+    }
+
+    setContextMenu({ x: e.clientX, y: e.clientY, items });
+  };
 
   return (
     <div
+      ref={canvasContainerRef}
       className="h-full w-full relative flex flex-col items-center justify-center bg-[#090a0d] overflow-hidden select-none"
       onWheel={handleWheel}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseUp}
+      onContextMenu={handleViewportContextMenu}
     >
       {displayImage ? (
         <div
-          className="absolute transition-transform duration-75 cursor-grab active:cursor-grabbing"
+          className="absolute transition-transform duration-75 cursor-grab active:cursor-grabbing flex items-center justify-center"
           style={{
             transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
             transformOrigin: 'center center'
           }}
         >
-          <img
-            src={displayImage}
-            alt="Viewport Output"
-            draggable={false}
-            className={`max-h-[85vh] max-w-[85vw] object-contain shadow-2xl pointer-events-none rounded ${
-              livePreview && isGenerating ? 'filter blur-[0.5px]' : ''
-            }`}
-          />
+          {/* Main Image A (Base Canvas) */}
+          <div className="relative max-h-[85vh] max-w-[85vw]">
+            <img
+              src={displayImage}
+              alt="Viewport Canvas (A)"
+              draggable={false}
+              className={`max-h-[85vh] max-w-[85vw] object-contain shadow-2xl pointer-events-none rounded ${
+                livePreview && isGenerating ? 'filter blur-[0.5px]' : ''
+              }`}
+            />
+
+            {/* A/B Split-Slider Overlay Image (B) */}
+            {isComparing && comparisonImage && (
+              <>
+                <div
+                  className="absolute inset-0 overflow-hidden pointer-events-none rounded"
+                  style={{
+                    clipPath: `inset(0 0 0 ${compareSplit}%)`
+                  }}
+                >
+                  <img
+                    src={comparisonImage}
+                    alt="Comparison View (B)"
+                    draggable={false}
+                    className="w-full h-full object-contain"
+                  />
+                </div>
+
+                {/* Draggable Vertical Split Handle */}
+                <div
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    setIsDraggingSlider(true);
+                  }}
+                  style={{ left: `${compareSplit}%` }}
+                  className="absolute top-0 bottom-0 w-1 bg-indigo-500 cursor-ew-resize z-30 shadow-[0_0_12px_rgba(99,102,241,0.8)]"
+                >
+                  <div className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-6 h-6 rounded-full bg-indigo-600 border-2 border-white shadow-xl flex items-center justify-center text-[9px] font-mono text-white font-bold cursor-ew-resize">
+                    ↔
+                  </div>
+                </div>
+
+                {/* Floating A/B Indicator Badges */}
+                <div className="absolute top-2 left-2 bg-black/75 backdrop-blur-md px-2 py-0.5 rounded text-[10px] font-mono text-cyan-300 border border-cyan-500/30 z-20 pointer-events-none">
+                  A (Current)
+                </div>
+                <div className="absolute top-2 right-2 bg-black/75 backdrop-blur-md px-2 py-0.5 rounded text-[10px] font-mono text-purple-300 border border-purple-500/30 z-20 pointer-events-none">
+                  B (Compare)
+                </div>
+              </>
+            )}
+          </div>
         </div>
       ) : (
         <span className="text-neutral-600 text-xs">No image rendered yet</span>
@@ -81,6 +209,24 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
       {/* Floating Viewport Toolset */}
       <div className="absolute top-3 right-3 flex items-center gap-1 bg-[#14161f]/90 border border-[#2b2f3a] rounded-lg p-1 backdrop-blur-sm shadow-xl z-20">
+        {/* A/B Compare Toggle Button */}
+        <button
+          onClick={() => {
+            if (!isComparing && !comparisonImage && history.length > 0) {
+              setComparisonImage(history[0].imageUrl);
+            }
+            setIsComparing(!isComparing);
+          }}
+          className={`p-1 rounded cursor-pointer transition ${
+            isComparing ? 'bg-indigo-600 text-white' : 'hover:bg-[#252a36] text-gray-300'
+          }`}
+          title="Toggle A/B Split-Slider Comparison"
+        >
+          <SplitSquareVertical className="w-3.5 h-3.5" />
+        </button>
+
+        <div className="h-3 w-px bg-[#2b2f3a] mx-0.5" />
+
         <button onClick={() => setZoom((z) => Math.min(10, z + 0.25))} className="p-1 hover:bg-[#252a36] text-gray-300 rounded" title="Zoom In">
           <ZoomIn className="w-3.5 h-3.5" />
         </button>
@@ -88,10 +234,36 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
         <button onClick={() => setZoom((z) => Math.max(0.1, z - 0.25))} className="p-1 hover:bg-[#252a36] text-gray-300 rounded" title="Zoom Out">
           <ZoomOut className="w-3.5 h-3.5" />
         </button>
-        <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} className="p-1 hover:bg-[#252a36] text-gray-300 rounded" title="Reset View">
+        <button onClick={resetTransform} className="p-1 hover:bg-[#252a36] text-gray-300 rounded" title="Reset View">
           <Maximize2 className="w-3.5 h-3.5" />
         </button>
       </div>
+
+      {/* A/B Comparison Selection Bar */}
+      {isComparing && (
+        <div className="absolute top-3 left-3 flex items-center gap-2 bg-[#14161f]/95 border border-indigo-500/40 rounded-lg p-1.5 backdrop-blur-md shadow-xl z-20 text-xs text-gray-200">
+          <span className="font-mono text-[10px] text-indigo-400 font-semibold">A/B Compare:</span>
+          <select
+            value={comparisonImage || ''}
+            onChange={(e) => setComparisonImage(e.target.value)}
+            className="bg-[#1b1e2a] border border-[#2d3246] rounded px-2 py-0.5 text-[11px] text-gray-200 outline-none max-w-xs truncate"
+          >
+            {history.map((h, i) => (
+              <option key={h.id} value={h.imageUrl}>
+                #{history.length - i}: {h.prompt.slice(0, 32)}... ({h.params.model.split('/').pop()})
+              </option>
+            ))}
+          </select>
+          <span className="font-mono text-[10px] text-gray-400">{compareSplit}%</span>
+          <button
+            onClick={() => setIsComparing(false)}
+            className="p-0.5 text-gray-400 hover:text-white ml-1 cursor-pointer"
+            title="Close Comparison"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Progress & Live Analytics */}
       {(isGenerating || metrics.totalTime > 0) && (
@@ -122,59 +294,58 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
           </div>
         </div>
       )}
+
+      {contextMenu && (
+        <CustomContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          title="Viewport Actions"
+          items={contextMenu.items}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 };
 
 /* =========================================================================
-   2. PROMPT & TWO-TIER DANBOORU BROWSER WORKSPACE
+   2. PROMPT & DANBOORU BROWSER ("ALL" AS FOREMOST LEFT PARENT)
    ========================================================================= */
 const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   const {
-    prompt,
-    negativePrompt,
-    setPrompt,
-    setNegativePrompt,
-    activeMacroCategory,
-    activeSubCategory,
-    pillSearchQuery,
-    setActiveMacroCategory,
-    setActiveSubCategory,
-    setPillSearchQuery,
-    enqueueAndProcess,
-    cancelGeneration,
-    isGenerating,
-    model
+    prompt, negativePrompt, setPrompt, setNegativePrompt, activeMacroCategory,
+    activeSubCategory, pillSearchQuery, setActiveMacroCategory, setActiveSubCategory,
+    setPillSearchQuery, enqueueAndProcess, cancelGeneration, isGenerating,
+    model, settings
   } = useAppStore();
 
   const [activeTarget, setActiveTarget] = useState<'positive' | 'negative'>('positive');
+  const [currentTags, setCurrentTags] = useState<string[]>([]);
   const [hoverDetail, setHoverDetail] = useState<TagDetail | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; title: string; items: ContextMenuItem[] } | null>(null);
+
+  const parentScrollRef = useRef<HTMLDivElement>(null);
+  const subScrollRef = useRef<HTMLDivElement>(null);
 
   const parentCategories = danbooru.getParentCategories();
-
-  // Set the first active parent category once loaded
-  useEffect(() => {
-    if (parentCategories.length > 0 && (!activeMacroCategory || !parentCategories.includes(activeMacroCategory))) {
-      setActiveMacroCategory(parentCategories[0]);
-      setActiveSubCategory('All');
-    }
-  }, [parentCategories, activeMacroCategory, setActiveMacroCategory, setActiveSubCategory]);
-
   const subCategories = danbooru.getSubCategories(activeMacroCategory);
-  const currentTags = danbooru.getTags(activeMacroCategory, activeSubCategory, pillSearchQuery);
 
-  const handleTagAction = (tag: string, e: React.MouseEvent) => {
-    const clean = tag.replace(/_/g, ' ');
-    let token = clean;
+  useEffect(() => {
+    let active = true;
+    danbooru.getTags(activeMacroCategory, activeSubCategory, pillSearchQuery).then((tags) => {
+      if (active) setCurrentTags(tags);
+    });
+    return () => {
+      active = false;
+    };
+  }, [activeMacroCategory, activeSubCategory, pillSearchQuery]);
 
-    if (e.shiftKey) {
-      token = `(${clean}:1.2)`;
-    }
+  const appendTag = (tag: string, target = activeTarget, weight = 1.0) => {
+    const clean = settings.useUnderscores ? tag.toLowerCase().replace(/\s+/g, '_') : tag.replace(/_/g, ' ');
+    const token = weight !== 1.0 ? `(${clean}:${weight.toFixed(2)})` : clean;
 
-    const targetBox = e.button === 2 ? (activeTarget === 'positive' ? 'negative' : 'positive') : activeTarget;
-
-    if (targetBox === 'positive') {
+    if (target === 'positive') {
       const current = prompt.trim();
       setPrompt(current ? `${current}, ${token}` : token);
     } else {
@@ -183,10 +354,43 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     }
   };
 
-  const handleTagHover = (e: React.MouseEvent, tag: string) => {
+  const handleTagRightClick = (e: React.MouseEvent, tag: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const items: ContextMenuItem[] = [
+      {
+        label: `Add to Positive (+1.0)`,
+        action: () => appendTag(tag, 'positive', 1.0)
+      },
+      {
+        label: `Add with (+${(1.0 + settings.tagClickWeightStep).toFixed(2)}x weight)`,
+        action: () => appendTag(tag, 'positive', 1.0 + settings.tagClickWeightStep)
+      },
+      {
+        label: `Add to Negative Prompt`,
+        action: () => appendTag(tag, 'negative', 1.0)
+      },
+      {
+        separator: true,
+        label: `Copy Tag Name`,
+        icon: <Copy className="w-3.5 h-3.5" />,
+        action: () => navigator.clipboard.writeText(settings.useUnderscores ? tag.replace(/\s+/g, '_') : tag.replace(/_/g, ' '))
+      }
+    ];
+
+    setContextMenu({ x: e.clientX, y: e.clientY, title: `Tag: ${tag}`, items });
+  };
+
+  const handleTagHover = async (e: React.MouseEvent, tag: string) => {
     const rect = e.currentTarget.getBoundingClientRect();
     setTooltipPos({ x: rect.left, y: rect.bottom + 6 });
-    setHoverDetail(danbooru.getTagDetail(tag, activeMacroCategory, activeSubCategory));
+    const detail = await danbooru.getTagDetail(tag, activeMacroCategory, activeSubCategory);
+    setHoverDetail(detail);
+  };
+
+  const handleWheelHorizontal = (ref: React.RefObject<HTMLDivElement | null>, e: React.WheelEvent) => {
+    if (ref.current) ref.current.scrollLeft += e.deltaY;
   };
 
   const formatCount = (n: number | null) => {
@@ -197,7 +401,10 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   };
 
   return (
-    <div className="h-full flex flex-col bg-[#0d0e12] select-none text-xs overflow-hidden" onContextMenu={(e) => e.preventDefault()}>
+    <div
+      className="h-full flex flex-col bg-[#0d0e12] select-none text-xs overflow-hidden"
+      style={{ zoom: `${settings.sectionScales.pills}%` }}
+    >
       {/* Top Prompt Textboxes */}
       <div className="p-2 border-b border-[#232631] bg-[#12141a] flex flex-col gap-2 shrink-0">
         <div className="flex gap-2 h-20">
@@ -257,38 +464,58 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         </div>
       </div>
 
-      {/* Two-Tier Browser (Matching Extension Screenshots) */}
+      {/* Two-Tier Browser */}
       <div className="flex-1 flex flex-col min-h-0 bg-[#0c0d12]">
         {/* Tier 1: Parent Categories */}
-        <div className="flex gap-1 overflow-x-auto p-1.5 border-b border-[#20232c] scrollbar-none bg-[#111318]">
-          {parentCategories.map((parent) => {
-            const count = danbooru.getParentCount(parent);
-            const isActive = activeMacroCategory === parent;
-            return (
-              <button
-                key={parent}
-                onClick={() => {
-                  setActiveMacroCategory(parent);
-                  setActiveSubCategory('All');
-                }}
-                className={`px-3 py-1 rounded text-xs whitespace-nowrap cursor-pointer transition ${
-                  isActive
-                    ? 'bg-[#4f46e5] text-white font-semibold shadow-md'
-                    : 'bg-[#181a20] border border-[#252833] text-gray-400 hover:text-gray-200'
-                }`}
-              >
-                <span>{parent}</span>
-                <span className={`ml-1 text-[11px] ${isActive ? 'text-indigo-200' : 'text-gray-500'}`}>
-                  ({count.toLocaleString()})
-                </span>
-              </button>
-            );
-          })}
+        <div className="flex items-center bg-[#111318] border-b border-[#20232c] px-1">
+          <button
+            onClick={() => parentScrollRef.current && (parentScrollRef.current.scrollLeft -= 220)}
+            className="p-1 text-gray-400 hover:text-white cursor-pointer"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+
+          <div
+            ref={parentScrollRef}
+            onWheel={(e) => handleWheelHorizontal(parentScrollRef, e)}
+            className="flex-1 flex gap-1.5 overflow-x-auto p-1.5 scrollbar-none scroll-smooth"
+          >
+            {parentCategories.map((parent) => {
+              const count = danbooru.getParentCount(parent);
+              const isActive = activeMacroCategory === parent;
+              return (
+                <button
+                  key={parent}
+                  onClick={() => {
+                    setActiveMacroCategory(parent);
+                    setActiveSubCategory('All');
+                  }}
+                  className={`px-3 py-1 rounded-md text-xs whitespace-nowrap cursor-pointer transition shrink-0 ${
+                    isActive
+                      ? 'bg-indigo-600 text-white font-semibold shadow-md'
+                      : 'bg-[#181a20] border border-[#252833] text-gray-400 hover:text-gray-200'
+                  }`}
+                >
+                  <span>{parent}</span>
+                  <span className={`ml-1 text-[11px] ${isActive ? 'text-indigo-200' : 'text-gray-500'}`}>
+                    ({count.toLocaleString()})
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <button
+            onClick={() => parentScrollRef.current && (parentScrollRef.current.scrollLeft += 220)}
+            className="p-1 text-gray-400 hover:text-white cursor-pointer"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
         </div>
 
-        {/* Tier 2: Subcategory Chips */}
+        {/* Tier 2: Subcategories */}
         <div className="flex items-center gap-2 p-1.5 border-b border-[#20232c] bg-[#13151b]">
-          <div className="relative w-44">
+          <div className="relative w-44 shrink-0">
             <Search className="w-3 h-3 absolute left-2 top-2 text-gray-400" />
             <input
               type="text"
@@ -299,7 +526,18 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             />
           </div>
 
-          <div className="flex-1 flex gap-1 overflow-x-auto scrollbar-none">
+          <button
+            onClick={() => subScrollRef.current && (subScrollRef.current.scrollLeft -= 220)}
+            className="p-0.5 text-gray-400 hover:text-white cursor-pointer shrink-0"
+          >
+            <ChevronLeft className="w-3.5 h-3.5" />
+          </button>
+
+          <div
+            ref={subScrollRef}
+            onWheel={(e) => handleWheelHorizontal(subScrollRef, e)}
+            className="flex-1 flex gap-1 overflow-x-auto scrollbar-none scroll-smooth"
+          >
             {subCategories.map((sub) => {
               const count = danbooru.getSubCount(activeMacroCategory, sub);
               const isActive = activeSubCategory === sub;
@@ -307,9 +545,9 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                 <button
                   key={sub}
                   onClick={() => setActiveSubCategory(sub)}
-                  className={`px-2.5 py-0.5 rounded-full text-[11px] whitespace-nowrap cursor-pointer transition ${
+                  className={`px-2.5 py-0.5 rounded-full text-[11px] whitespace-nowrap cursor-pointer transition shrink-0 ${
                     isActive
-                      ? 'bg-[#7c3aed] text-white font-medium shadow-sm'
+                      ? 'bg-purple-600 text-white font-medium shadow-sm'
                       : 'bg-[#181a20] border border-[#252833] text-gray-400 hover:text-gray-200'
                   }`}
                 >
@@ -321,9 +559,16 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
               );
             })}
           </div>
+
+          <button
+            onClick={() => subScrollRef.current && (subScrollRef.current.scrollLeft += 220)}
+            className="p-0.5 text-gray-400 hover:text-white cursor-pointer shrink-0"
+          >
+            <ChevronRight className="w-3.5 h-3.5" />
+          </button>
         </div>
 
-        {/* Tier 3: `+ tag` Pills Grid */}
+        {/* Tier 3: Tag Badges */}
         <div className="flex-1 p-2 overflow-y-auto content-start flex flex-wrap gap-1.5 bg-[#0a0b0e]">
           {currentTags.length === 0 ? (
             <span className="text-gray-600 m-auto text-xs">
@@ -337,16 +582,16 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                   key={tag}
                   onMouseEnter={(e) => handleTagHover(e, tag)}
                   onMouseLeave={() => setHoverDetail(null)}
-                  onClick={(e) => handleTagAction(tag, e)}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    handleTagAction(tag, e);
+                  onClick={(e) => {
+                    if (e.shiftKey) appendTag(tag, activeTarget, 1.0 + settings.tagClickWeightStep);
+                    else appendTag(tag, activeTarget, 1.0);
                   }}
+                  onContextMenu={(e) => handleTagRightClick(e, tag)}
                   className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-[#16181f] border border-[#232733] text-gray-300 hover:border-indigo-500 hover:text-white cursor-pointer transition text-xs select-none"
                 >
-                  <span className="text-gray-500 text-[11px]">+</span>
-                  <span>{tag.replace(/_/g, ' ')}</span>
-                  {count && (
+                  {settings.showTagPlusPrefix && <span className="text-gray-500 text-[11px]">+</span>}
+                  <span>{settings.useUnderscores ? tag.replace(/\s+/g, '_') : tag.replace(/_/g, ' ')}</span>
+                  {settings.showTagPostCounts && count && (
                     <span className="text-[10px] font-mono text-gray-500 bg-[#0f1015] px-1 rounded">
                       {formatCount(count)}
                     </span>
@@ -358,7 +603,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         </div>
       </div>
 
-      {/* Floating Extension-Style Wiki Popover */}
+      {/* Floating Hover Card */}
       {hoverDetail && tooltipPos && (
         <div
           className="fixed z-50 w-72 bg-[#15161d] border border-[#2c303f] rounded-lg shadow-2xl p-3 text-xs text-gray-200 pointer-events-none"
@@ -383,26 +628,49 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
           </p>
           <div className="text-[10px] text-gray-400 border-t border-[#232633] pt-1.5 flex flex-col gap-0.5 font-mono">
             <span><b>Click:</b> Add to Active</span>
-            <span><b>Shift+Click:</b> (1.2x)</span>
-            <span><b>Right-Click:</b> Negative</span>
+            <span><b>Shift+Click:</b> (+{(1.0 + settings.tagClickWeightStep).toFixed(2)}x)</span>
+            <span><b>Right-Click:</b> Options Menu</span>
           </div>
         </div>
+      )}
+
+      {contextMenu && (
+        <CustomContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          title={contextMenu.title}
+          items={contextMenu.items}
+          onClose={() => setContextMenu(null)}
+        />
       )}
     </div>
   );
 };
 
 /* =========================================================================
-   3. EXTRA NETWORKS PANEL
+   3. EXTRA NETWORKS (WITH MODELS/CHECKPOINTS & CIVITAI METADATA SEARCH)
    ========================================================================= */
 const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
-  const { lorasList, embeddingsList, wildcardsList, loadAssets, prompt, setPrompt } = useAppStore();
-  const [tab, setTab] = useState<'lora' | 'embedding' | 'wildcard'>('lora');
+  const {
+    modelsList, lorasList, embeddingsList, wildcardsList, loadAssets,
+    prompt, setPrompt, setModel, settings, syncCivitaiMetadata
+  } = useAppStore();
+
+  const [tab, setTab] = useState<'model' | 'lora' | 'embedding' | 'wildcard'>('model');
   const [viewMode, setViewMode] = useState<'cards' | 'list'>('cards');
   const [search, setSearch] = useState('');
-  const [weight, setWeight] = useState(1.0);
+  const [weight, setWeight] = useState(settings.defaultLoraWeight || 1.0);
+
+  // Civitai Search Modal state
+  const [showCivitaiModal, setShowCivitaiModal] = useState(false);
+  const [selectedCivitaiCategory, setSelectedCivitaiCategory] = useState<'all' | 'models' | 'loras' | 'embeddings'>('all');
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<{ current: number; total: number; name: string } | null>(null);
+
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; title: string; items: ContextMenuItem[] } | null>(null);
 
   const getActiveList = (): ModelItem[] => {
+    if (tab === 'model') return modelsList;
     if (tab === 'lora') return lorasList;
     if (tab === 'embedding') return embeddingsList;
     return wildcardsList.map((w) => ({ name: w, previewUrl: undefined }));
@@ -410,43 +678,123 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
 
   const filtered = getActiveList().filter((item) => item.name.toLowerCase().includes(search.toLowerCase()));
 
-  const injectAsset = (name: string) => {
+  const handleItemClick = (item: ModelItem) => {
+    if (tab === 'model') {
+      setModel(item.name);
+      return;
+    }
+
     let token = '';
-    if (tab === 'lora') token = `<lora:${name}:${weight}>`;
-    else if (tab === 'embedding') token = `embedding:${name}`;
-    else token = `<wildcard:${name}>`;
+    if (tab === 'lora') {
+      token = `<lora:${item.name}:${weight}>`;
+      if (settings.autoInjectLoraTrigger && item.triggerWords && item.triggerWords.length > 0) {
+        token = `${token}, ${item.triggerWords.join(', ')}`;
+      }
+    } else if (tab === 'embedding') {
+      token = `embedding:${item.name}`;
+    } else {
+      token = `<wildcard:${item.name}>`;
+    }
 
     setPrompt(prompt.trim() ? `${prompt.trim()}, ${token}` : token);
   };
 
+  const handleCardContextMenu = (e: React.MouseEvent, item: ModelItem) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const items: ContextMenuItem[] = [];
+
+    if (tab === 'model') {
+      items.push({
+        label: `Set as Active Model`,
+        icon: <Check className="w-3.5 h-3.5 text-emerald-400" />,
+        action: () => setModel(item.name)
+      });
+    } else {
+      items.push({
+        label: `Insert ${item.name}`,
+        icon: <ArrowUpRight className="w-3.5 h-3.5" />,
+        action: () => handleItemClick(item)
+      });
+    }
+
+    if (item.triggerWords && item.triggerWords.length > 0) {
+      items.push({
+        label: `Copy Trigger Words`,
+        icon: <Copy className="w-3.5 h-3.5" />,
+        action: () => navigator.clipboard.writeText(item.triggerWords!.join(', '))
+      });
+    }
+
+    items.push({
+      label: `Copy File Name`,
+      icon: <Copy className="w-3.5 h-3.5" />,
+      action: () => navigator.clipboard.writeText(item.name)
+    });
+
+    setContextMenu({ x: e.clientX, y: e.clientY, title: `${tab.toUpperCase()}: ${item.name}`, items });
+  };
+
+  const handleStartCivitaiSync = async () => {
+    setIsSyncing(true);
+    setSyncProgress(null);
+    await syncCivitaiMetadata(selectedCivitaiCategory, (current, total, name) => {
+      setSyncProgress({ current, total, name });
+    });
+    setIsSyncing(false);
+    setShowCivitaiModal(false);
+  };
+
   return (
-    <div className="h-full p-3 bg-[#121418] flex flex-col gap-2.5 text-xs select-none overflow-hidden">
+    <div
+      className="h-full p-3 bg-[#121418] flex flex-col gap-2.5 text-xs select-none overflow-hidden"
+      style={{ zoom: `${settings.sectionScales.extranetworks}%` }}
+    >
+      {/* Tab bar */}
       <div className="flex items-center justify-between border-b border-[#252a35] pb-1.5">
-        <div className="flex gap-1">
+        <div className="flex gap-1 overflow-x-auto scrollbar-none">
+          <button
+            onClick={() => setTab('model')}
+            className={`px-2 py-0.5 rounded text-xs cursor-pointer ${tab === 'model' ? 'bg-indigo-600 text-white font-medium' : 'bg-[#181a20] text-gray-400'}`}
+          >
+            Models ({modelsList.length})
+          </button>
           <button
             onClick={() => setTab('lora')}
-            className={`px-2 py-0.5 rounded text-xs ${tab === 'lora' ? 'bg-indigo-600 text-white' : 'bg-[#181a20] text-gray-400'}`}
+            className={`px-2 py-0.5 rounded text-xs cursor-pointer ${tab === 'lora' ? 'bg-indigo-600 text-white font-medium' : 'bg-[#181a20] text-gray-400'}`}
           >
             LoRAs ({lorasList.length})
           </button>
           <button
             onClick={() => setTab('embedding')}
-            className={`px-2 py-0.5 rounded text-xs ${tab === 'embedding' ? 'bg-indigo-600 text-white' : 'bg-[#181a20] text-gray-400'}`}
+            className={`px-2 py-0.5 rounded text-xs cursor-pointer ${tab === 'embedding' ? 'bg-indigo-600 text-white font-medium' : 'bg-[#181a20] text-gray-400'}`}
           >
             Embeddings ({embeddingsList.length})
           </button>
           <button
             onClick={() => setTab('wildcard')}
-            className={`px-2 py-0.5 rounded text-xs ${tab === 'wildcard' ? 'bg-indigo-600 text-white' : 'bg-[#181a20] text-gray-400'}`}
+            className={`px-2 py-0.5 rounded text-xs cursor-pointer ${tab === 'wildcard' ? 'bg-indigo-600 text-white font-medium' : 'bg-[#181a20] text-gray-400'}`}
           >
             Wildcards ({wildcardsList.length})
           </button>
         </div>
-        <div className="flex items-center gap-1">
+
+        <div className="flex items-center gap-1.5">
+          {/* Civitai Search Metadata Button */}
+          <button
+            onClick={() => setShowCivitaiModal(true)}
+            className="px-2 py-0.5 bg-[#1f2330] hover:bg-indigo-600 hover:text-white border border-[#2d3345] text-indigo-300 rounded text-[11px] flex items-center gap-1 cursor-pointer transition shadow-sm"
+            title="Search Civitai for missing previews and trigger words"
+          >
+            <Globe className="w-3 h-3" />
+            <span>Civitai Meta</span>
+          </button>
+
           <button
             onClick={() => setViewMode(viewMode === 'cards' ? 'list' : 'cards')}
             className="p-1 hover:bg-[#202430] text-gray-300 rounded cursor-pointer"
-            title="Toggle View"
+            title="Toggle Card / List View"
           >
             {viewMode === 'cards' ? <List className="w-3.5 h-3.5" /> : <Grid className="w-3.5 h-3.5" />}
           </button>
@@ -456,6 +804,7 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
         </div>
       </div>
 
+      {/* Filter and Weight controls */}
       <div className="flex gap-2">
         <div className="relative flex-1">
           <Search className="w-3.5 h-3.5 absolute left-2 top-2 text-gray-400" />
@@ -463,7 +812,7 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder={`Search ${tab}...`}
+            placeholder={`Search ${tab}s...`}
             className="w-full bg-[#181a20] border border-[#2b2f3a] rounded pl-7 pr-2 py-1 text-xs text-gray-200 outline-none"
           />
         </div>
@@ -481,24 +830,26 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
         )}
       </div>
 
+      {/* Grid or List View */}
       <div className={`flex-1 overflow-y-auto pr-1 ${viewMode === 'cards' ? 'grid grid-cols-3 gap-2' : 'flex flex-col gap-1'}`}>
         {filtered.map((item) => (
           <div
             key={item.name}
-            onClick={() => injectAsset(item.name)}
+            onClick={() => handleItemClick(item)}
+            onContextMenu={(e) => handleCardContextMenu(e, item)}
             className={`border border-[#282c37] bg-[#16181f] rounded hover:border-indigo-500 cursor-pointer transition flex ${
               viewMode === 'cards' ? 'flex-col h-40 overflow-hidden' : 'items-center justify-between p-2'
             }`}
           >
             {viewMode === 'cards' ? (
               <>
-                <div className="h-28 w-full bg-[#0d0e12] overflow-hidden flex items-center justify-center relative">
+                <div className="h-28 w-full overflow-hidden flex items-center justify-center relative">
                   {item.previewUrl ? (
                     <img src={item.previewUrl} alt={item.name} className="w-full h-full object-cover" />
                   ) : (
-                    <Box className="w-8 h-8 text-neutral-700" />
+                    <ModelPlaceholder name={item.name} type={tab === 'model' ? 'model' as any : tab} />
                   )}
-                  <span className="absolute bottom-1 right-1 text-[9px] bg-black/60 font-mono text-indigo-300 px-1 py-0.2 rounded">
+                  <span className="absolute bottom-1 right-1 text-[9px] bg-black/70 font-mono text-indigo-300 px-1 py-0.2 rounded border border-white/5">
                     {tab}
                   </span>
                 </div>
@@ -509,34 +860,154 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
             ) : (
               <>
                 <div className="flex items-center gap-2 truncate">
-                  {item.previewUrl ? (
-                    <img src={item.previewUrl} alt="thumb" className="w-7 h-7 rounded object-cover" />
-                  ) : (
-                    <Box className="w-5 h-5 text-neutral-600" />
-                  )}
+                  <div className="w-7 h-7 rounded overflow-hidden shrink-0">
+                    {item.previewUrl ? (
+                      <img src={item.previewUrl} alt="thumb" className="w-full h-full object-cover" />
+                    ) : (
+                      <ModelPlaceholder name={item.name} type={tab === 'model' ? 'model' as any : tab} />
+                    )}
+                  </div>
                   <span className="font-medium text-gray-300 text-xs truncate">{item.name}</span>
                 </div>
                 <span className="text-[10px] text-indigo-400 font-mono bg-indigo-950/50 px-1.5 py-0.5 rounded border border-indigo-500/30">
-                  + Insert
+                  {tab === 'model' ? 'Select' : '+ Insert'}
                 </span>
               </>
             )}
           </div>
         ))}
       </div>
+
+      {/* Civitai Metadata Fetch Modal */}
+      {showCivitaiModal && (
+        <div className="fixed inset-0 z-999999 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-96 bg-[#161822] border border-[#2d3246] rounded-xl shadow-2xl p-4 text-xs text-gray-200 flex flex-col gap-3">
+            <div className="flex justify-between items-center border-b border-[#252a38] pb-2 font-semibold text-sm text-indigo-400">
+              <span className="flex items-center gap-2"><Globe className="w-4 h-4" /> Civitai Metadata Search</span>
+              {!isSyncing && (
+                <button onClick={() => setShowCivitaiModal(false)} className="text-gray-500 hover:text-white">✕</button>
+              )}
+            </div>
+
+            <p className="text-gray-400 text-[11px] leading-relaxed">
+              Scan Civitai by clean model name to download preview images, trained trigger words, and descriptions for models missing covers.
+            </p>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[11px] text-gray-400">Select Category to Search:</label>
+              <select
+                disabled={isSyncing}
+                value={selectedCivitaiCategory}
+                onChange={(e) => setSelectedCivitaiCategory(e.target.value as any)}
+                className="w-full bg-[#12141c] border border-[#292e3f] rounded p-1.5 text-gray-200 outline-none"
+              >
+                <option value="all">All Categories (Models, LoRAs, Embeddings)</option>
+                <option value="models">Checkpoints Only ({modelsList.length} items)</option>
+                <option value="loras">LoRAs Only ({lorasList.length} items)</option>
+                <option value="embeddings">Embeddings Only ({embeddingsList.length} items)</option>
+              </select>
+            </div>
+
+            {isSyncing && syncProgress && (
+              <div className="p-2.5 bg-[#12141c] border border-indigo-500/30 rounded flex flex-col gap-1.5">
+                <div className="flex justify-between font-mono text-[10px] text-gray-400">
+                  <span className="truncate pr-2">Scanning: {syncProgress.name}</span>
+                  <span>{syncProgress.current}/{syncProgress.total}</span>
+                </div>
+                <div className="w-full bg-[#1e2230] h-1.5 rounded-full overflow-hidden">
+                  <div
+                    className="bg-indigo-500 h-full transition-all duration-150"
+                    style={{ width: `${(syncProgress.current / syncProgress.total) * 100}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-[#252a38]">
+              <button
+                disabled={isSyncing}
+                onClick={() => setShowCivitaiModal(false)}
+                className="px-3 py-1 bg-[#1a1d26] text-gray-400 rounded hover:bg-[#252a36]"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={isSyncing}
+                onClick={handleStartCivitaiSync}
+                className="px-4 py-1 bg-indigo-600 hover:bg-indigo-500 font-semibold text-white rounded cursor-pointer transition shadow-md"
+              >
+                {isSyncing ? 'Fetching...' : 'Start Search'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {contextMenu && (
+        <CustomContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          title={contextMenu.title}
+          items={contextMenu.items}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 };
 
 /* =========================================================================
-   4. GENERATION HISTORY
+   4. HISTORY PANEL (WITH 'USE GENERATION PARAMS' & 'SET AS COMPARE B')
    ========================================================================= */
 const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
-  const { history, setParams } = useAppStore();
+  const { history, setParams, useGenerationParams, setComparisonImage, settings } = useAppStore();
   const [viewMode, setViewMode] = useState<'cards' | 'list'>('cards');
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; title: string; items: ContextMenuItem[] } | null>(null);
+
+  const handleHistoryContextMenu = (e: React.MouseEvent, item: HistoryItem) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const items: ContextMenuItem[] = [
+      {
+        label: 'Use generation params',
+        icon: <Check className="w-3.5 h-3.5 text-emerald-400" />,
+        action: () => useGenerationParams(item)
+      },
+      {
+        label: 'Set as Comparison Image (B)',
+        icon: <SplitSquareVertical className="w-3.5 h-3.5 text-indigo-400" />,
+        action: () => setComparisonImage(item.imageUrl)
+      },
+      {
+        label: 'View in Viewport Canvas',
+        icon: <Maximize2 className="w-3.5 h-3.5" />,
+        action: () => setParams({ activeImage: item.imageUrl })
+      },
+      {
+        label: 'Copy Positive Prompt',
+        icon: <Copy className="w-3.5 h-3.5" />,
+        action: () => navigator.clipboard.writeText(item.prompt)
+      },
+      {
+        separator: true,
+        label: 'Delete from History',
+        danger: true,
+        icon: <Trash2 className="w-3.5 h-3.5" />,
+        action: () => {
+          setParams({ history: history.filter((h) => h.id !== item.id) });
+        }
+      }
+    ];
+
+    setContextMenu({ x: e.clientX, y: e.clientY, title: 'Output History Entry', items });
+  };
 
   return (
-    <div className="h-full p-3 bg-[#121418] flex flex-col gap-2.5 overflow-hidden select-none text-xs">
+    <div
+      className="h-full p-3 bg-[#121418] flex flex-col gap-2.5 overflow-hidden select-none text-xs"
+      style={{ zoom: `${settings.sectionScales.history}%` }}
+    >
       <div className="flex items-center justify-between border-b border-[#252a35] pb-1.5">
         <span className="font-semibold text-gray-300 flex items-center gap-1">
           <HistoryIcon className="w-3.5 h-3.5 text-indigo-400" /> Output History ({history.length})
@@ -558,6 +1029,7 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
             <div
               key={item.id}
               onClick={() => setParams({ activeImage: item.imageUrl })}
+              onContextMenu={(e) => handleHistoryContextMenu(e, item)}
               className={`border border-[#252a35] bg-[#161821] rounded hover:border-indigo-500 cursor-pointer transition flex ${
                 viewMode === 'cards' ? 'flex-col p-1.5 gap-1.5' : 'items-center gap-2 p-2'
               }`}
@@ -581,23 +1053,67 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
           ))
         )}
       </div>
+
+      {contextMenu && (
+        <CustomContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          title={contextMenu.title}
+          items={contextMenu.items}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 };
 
 /* =========================================================================
-   5. IMAGE SEARCH PANEL
+   5. IMAGE SEARCH, CONTROLNET, ADETAILER, PARAMS
    ========================================================================= */
 const ImageSearchPanel: React.FC<IDockviewPanelProps> = () => {
-  const { history, setParams } = useAppStore();
+  const { history, setParams, useGenerationParams, setComparisonImage, settings } = useAppStore();
   const [query, setQuery] = useState('');
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; title: string; items: ContextMenuItem[] } | null>(null);
 
   const filtered = history.filter(
     (h) => h.prompt.toLowerCase().includes(query.toLowerCase()) || h.params.model.toLowerCase().includes(query.toLowerCase())
   );
 
+  const handleSearchContextMenu = (e: React.MouseEvent, item: HistoryItem) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const items: ContextMenuItem[] = [
+      {
+        label: 'Use generation params',
+        icon: <Check className="w-3.5 h-3.5 text-emerald-400" />,
+        action: () => useGenerationParams(item)
+      },
+      {
+        label: 'Set as Comparison Image (B)',
+        icon: <SplitSquareVertical className="w-3.5 h-3.5 text-indigo-400" />,
+        action: () => setComparisonImage(item.imageUrl)
+      },
+      {
+        label: 'View in Viewport Canvas',
+        icon: <Maximize2 className="w-3.5 h-3.5" />,
+        action: () => setParams({ activeImage: item.imageUrl })
+      },
+      {
+        label: 'Copy Positive Prompt',
+        icon: <Copy className="w-3.5 h-3.5" />,
+        action: () => navigator.clipboard.writeText(item.prompt)
+      }
+    ];
+
+    setContextMenu({ x: e.clientX, y: e.clientY, title: 'Image Metadata', items });
+  };
+
   return (
-    <div className="h-full p-3 bg-[#121418] flex flex-col gap-2.5 text-xs select-none overflow-hidden">
+    <div
+      className="h-full p-3 bg-[#121418] flex flex-col gap-2.5 text-xs select-none overflow-hidden"
+      style={{ zoom: `${settings.sectionScales.imagesearch}%` }}
+    >
       <div className="relative">
         <Search className="w-3.5 h-3.5 absolute left-2.5 top-2.5 text-gray-400" />
         <input
@@ -617,6 +1133,7 @@ const ImageSearchPanel: React.FC<IDockviewPanelProps> = () => {
             <div
               key={item.id}
               onClick={() => setParams({ activeImage: item.imageUrl })}
+              onContextMenu={(e) => handleSearchContextMenu(e, item)}
               className="border border-[#252a35] bg-[#161821] p-1.5 rounded hover:border-indigo-500 cursor-pointer flex flex-col gap-1"
             >
               <img src={item.imageUrl} alt="search thumb" className="w-full h-24 object-cover rounded" />
@@ -625,21 +1142,31 @@ const ImageSearchPanel: React.FC<IDockviewPanelProps> = () => {
           ))
         )}
       </div>
+
+      {contextMenu && (
+        <CustomContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          title={contextMenu.title}
+          items={contextMenu.items}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 };
 
-/* =========================================================================
-   6. CONTROLNET PANEL
-   ========================================================================= */
 const ControlNetPanel: React.FC<IDockviewPanelProps> = () => {
-  const { controlNetUnits, updateControlNet } = useAppStore();
+  const { controlNetUnits, updateControlNet, settings } = useAppStore();
   const [activeUnitId, setActiveUnitId] = useState('1');
 
   const activeUnit = controlNetUnits.find((u) => u.id === activeUnitId) || controlNetUnits[0];
 
   return (
-    <div className="h-full p-3 bg-[#121418] flex flex-col gap-3 text-xs overflow-y-auto select-none">
+    <div
+      className="h-full p-3 bg-[#121418] flex flex-col gap-3 text-xs overflow-y-auto select-none"
+      style={{ zoom: `${settings.sectionScales.controlnet}%` }}
+    >
       <div className="flex gap-1 border-b border-[#252a35] pb-2">
         {controlNetUnits.map((unit) => (
           <button
@@ -714,17 +1241,17 @@ const ControlNetPanel: React.FC<IDockviewPanelProps> = () => {
   );
 };
 
-/* =========================================================================
-   7. ADETAILER PANEL
-   ========================================================================= */
 const ADetailerPanel: React.FC<IDockviewPanelProps> = () => {
-  const { aDetailerUnits, updateADetailer } = useAppStore();
+  const { aDetailerUnits, updateADetailer, settings } = useAppStore();
   const [activeId, setActiveId] = useState('1');
 
   const unit = aDetailerUnits.find((u) => u.id === activeId) || aDetailerUnits[0];
 
   return (
-    <div className="h-full p-3 bg-[#121418] flex flex-col gap-3 text-xs overflow-y-auto select-none">
+    <div
+      className="h-full p-3 bg-[#121418] flex flex-col gap-3 text-xs overflow-y-auto select-none"
+      style={{ zoom: `${settings.sectionScales.adetailer}%` }}
+    >
       <div className="flex gap-1 border-b border-[#252a35] pb-2">
         {aDetailerUnits.map((u) => (
           <button
@@ -800,14 +1327,11 @@ const ADetailerPanel: React.FC<IDockviewPanelProps> = () => {
   );
 };
 
-/* =========================================================================
-   8. PARAMETERS PANEL
-   ========================================================================= */
 const ParamsPanel: React.FC<IDockviewPanelProps> = () => {
   const {
     steps, cfgScale, width, height, seed, sampler, scheduler,
     model, modelsList, vae, vaesList, textEncoder, textEncodersList,
-    setParams, setModel, loadAssets
+    setParams, setModel, loadAssets, settings
   } = useAppStore();
 
   useEffect(() => {
@@ -815,7 +1339,10 @@ const ParamsPanel: React.FC<IDockviewPanelProps> = () => {
   }, [loadAssets]);
 
   return (
-    <div className="h-full p-3 bg-[#121418] flex flex-col gap-3 text-xs overflow-y-auto select-none">
+    <div
+      className="h-full p-3 bg-[#121418] flex flex-col gap-3 text-xs overflow-y-auto select-none"
+      style={{ zoom: `${settings.sectionScales.params}%` }}
+    >
       <div>
         <div className="flex justify-between items-center mb-1">
           <label className="text-gray-400 font-medium">Checkpoint Model</label>
@@ -956,7 +1483,7 @@ const ParamsPanel: React.FC<IDockviewPanelProps> = () => {
 };
 
 /* =========================================================================
-   9. WORKSPACE CONTAINER
+   6. MAIN WORKSPACE WITH TOP BAR, PRESETS & SETTINGS MODAL
    ========================================================================= */
 const components = {
   params: ParamsPanel,
@@ -969,35 +1496,111 @@ const components = {
 };
 
 export const Workspace: React.FC = () => {
-  const { uiScale, setUiScale } = useAppStore();
+  const {
+    settings,
+    updateSettings,
+    setSectionScale,
+    setPrompt,
+    setNegativePrompt
+  } = useAppStore();
+
   const [dockApi, setDockApi] = useState<DockviewApi | null>(null);
   const [isTopBarCollapsed, setIsTopBarCollapsed] = useState(false);
   const [showAddMenu, setShowAddMenu] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [activeScaleSection, setActiveScaleSection] = useState<keyof AppSettings['sectionScales']>('pills');
+
+  const [globalContextMenu, setGlobalContextMenu] = useState<{ x: number; y: number; title: string; items: ContextMenuItem[] } | null>(null);
 
   const [triggerPos, setTriggerPos] = useState({ x: 12, y: 12 });
   const isDraggingTrigger = useRef(false);
   const dragTriggerOffset = useRef({ x: 0, y: 0 });
 
-  const [bottomHeight, setBottomHeight] = useState(340);
+  const [bottomHeight, setBottomHeight] = useState(settings.bottomPanelHeight || 340);
   const isResizingBottom = useRef(false);
+
+  useEffect(() => {
+    const handleGlobalContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+      const items: ContextMenuItem[] = [
+        {
+          label: 'Clear Positive Prompt',
+          icon: <Trash2 className="w-3.5 h-3.5" />,
+          action: () => setPrompt('')
+        },
+        {
+          label: 'Clear Negative Prompt',
+          icon: <Trash2 className="w-3.5 h-3.5" />,
+          action: () => setNegativePrompt('')
+        },
+        {
+          separator: true,
+          label: 'Reload Asset Catalogs',
+          icon: <RotateCw className="w-3.5 h-3.5" />,
+          action: () => useAppStore.getState().loadAssets()
+        }
+      ];
+      setGlobalContextMenu({ x: e.clientX, y: e.clientY, title: 'Workspace Actions', items });
+    };
+
+    window.addEventListener('contextmenu', handleGlobalContextMenu);
+    return () => window.removeEventListener('contextmenu', handleGlobalContextMenu);
+  }, [setPrompt, setNegativePrompt]);
 
   const onReady = (event: DockviewReadyEvent) => {
     setDockApi(event.api);
 
-    event.api.addPanel({
-      id: 'params_panel',
-      component: 'params',
-      title: 'Parameters',
-      initialWidth: 320
-    });
+    if (settings.autoSaveLayout) {
+      const savedLayout = localStorage.getItem('swarm_dockview_layout');
+      if (savedLayout) {
+        try {
+          event.api.fromJSON(JSON.parse(savedLayout));
+          return;
+        } catch {}
+      }
+    }
 
-    event.api.addPanel({
-      id: 'preview_panel',
-      component: 'preview',
-      title: 'Viewport',
-      position: { referencePanel: 'params_panel', direction: 'right' }
-    });
+    applyLayoutPreset(settings.activePreset, event.api);
   };
+
+  const applyLayoutPreset = (presetName: AppSettings['activePreset'], api = dockApi) => {
+    if (!api) return;
+    api.clear();
+
+    if (presetName === 'Prompt Engineer') {
+      setBottomHeight(520);
+      const params = api.addPanel({ id: 'params_panel', component: 'params', title: 'Parameters', initialWidth: 280 });
+      api.addPanel({ id: 'preview_panel', component: 'preview', title: 'Viewport', position: { referencePanel: params, direction: 'right' } });
+      api.addPanel({ id: 'extranetworks_panel', component: 'extranetworks', title: 'Extra Networks', position: { referencePanel: params, direction: 'within' } });
+    } else if (presetName === 'Studio Canvas') {
+      setBottomHeight(220);
+      const preview = api.addPanel({ id: 'preview_panel', component: 'preview', title: 'Viewport' });
+      api.addPanel({ id: 'params_panel', component: 'params', title: 'Parameters', position: { referencePanel: preview, direction: 'left' }, initialWidth: 300 });
+    } else if (presetName === 'Multi-ControlNet') {
+      setBottomHeight(300);
+      const params = api.addPanel({ id: 'params_panel', component: 'params', title: 'Parameters', initialWidth: 300 });
+      const cnet = api.addPanel({ id: 'controlnet_panel', component: 'controlnet', title: 'ControlNet', position: { referencePanel: params, direction: 'right' }, initialWidth: 320 });
+      api.addPanel({ id: 'preview_panel', component: 'preview', title: 'Viewport', position: { referencePanel: cnet, direction: 'right' } });
+    } else {
+      setBottomHeight(340);
+      const params = api.addPanel({ id: 'params_panel', component: 'params', title: 'Parameters', initialWidth: 320 });
+      api.addPanel({ id: 'preview_panel', component: 'preview', title: 'Viewport', position: { referencePanel: params, direction: 'right' } });
+    }
+
+    updateSettings({ activePreset: presetName, bottomPanelHeight: bottomHeight });
+  };
+
+  useEffect(() => {
+    if (!dockApi) return;
+    const disposable = dockApi.onDidLayoutChange(() => {
+      if (settings.autoSaveLayout) {
+        try {
+          localStorage.setItem('swarm_dockview_layout', JSON.stringify(dockApi.toJSON()));
+        } catch {}
+      }
+    });
+    return () => disposable.dispose();
+  }, [dockApi, settings.autoSaveLayout]);
 
   const addPanel = (type: string, title: string) => {
     if (!dockApi) return;
@@ -1028,7 +1631,9 @@ export const Workspace: React.FC = () => {
       }
       if (isResizingBottom.current) {
         const newHeight = window.innerHeight - e.clientY;
-        setBottomHeight(Math.max(160, Math.min(window.innerHeight - 150, newHeight)));
+        const clamped = Math.max(160, Math.min(window.innerHeight - 150, newHeight));
+        setBottomHeight(clamped);
+        updateSettings({ bottomPanelHeight: clamped });
       }
     };
 
@@ -1043,75 +1648,114 @@ export const Workspace: React.FC = () => {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [triggerPos]);
+  }, [triggerPos, updateSettings]);
 
   return (
-    <div
-      className="w-screen h-screen flex flex-col bg-[#0f1115] overflow-hidden"
-      style={{ zoom: `${uiScale}%` }}
-    >
+    <div className="w-screen h-screen flex flex-col bg-[#0f1115] overflow-hidden">
       {!isTopBarCollapsed ? (
         <div className="h-9 bg-[#13151b] border-b border-[#252a35] px-3 flex items-center justify-between select-none shrink-0 z-30">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <button
               onClick={() => setIsTopBarCollapsed(true)}
-              title="Click to collapse header into movable trigger"
+              title="Click to collapse header"
               className="p-1 hover:bg-[#202430] rounded cursor-pointer transition text-indigo-400 hover:text-white"
             >
               <LayoutGrid className="w-4 h-4" />
             </button>
             <span className="font-semibold text-xs text-gray-200">SwarmCanvas</span>
+
+            {/* Presets */}
+            <div className="flex items-center gap-1 bg-[#181b24] border border-[#2b2f3a] px-1.5 py-0.5 rounded text-[11px]">
+              <span className="text-gray-400 font-mono text-[10px]">Preset:</span>
+              {(['Default', 'Prompt Engineer', 'Studio Canvas', 'Multi-ControlNet'] as const).map((pr) => (
+                <button
+                  key={pr}
+                  onClick={() => applyLayoutPreset(pr)}
+                  className={`px-1.5 py-0.5 rounded cursor-pointer transition ${
+                    settings.activePreset === pr ? 'bg-indigo-600 text-white font-medium' : 'text-gray-400 hover:text-gray-200'
+                  }`}
+                >
+                  {pr}
+                </button>
+              ))}
+            </div>
           </div>
 
-          <div className="flex items-center gap-2 bg-[#181b24] border border-[#2b2f3a] px-2.5 py-0.5 rounded-md">
-            <Sliders className="w-3 h-3 text-gray-400" />
-            <span className="text-[10px] text-gray-400 font-mono">UI Scale:</span>
-            <input
-              type="range"
-              min="75"
-              max="150"
-              step="5"
-              value={uiScale}
-              onChange={(e) => setUiScale(Number(e.target.value))}
-              className="w-24 h-1 bg-[#252a36] rounded-lg appearance-none cursor-pointer accent-indigo-500"
-            />
-            <span className="text-[10px] text-indigo-400 font-mono w-8 text-right">{uiScale}%</span>
-          </div>
+          <div className="flex items-center gap-3">
+            {/* Exclusive Section Zoom Control */}
+            <div className="flex items-center gap-2 bg-[#181b24] border border-[#2b2f3a] px-2 py-0.5 rounded-md">
+              <Sliders className="w-3 h-3 text-gray-400" />
+              <select
+                value={activeScaleSection}
+                onChange={(e) => setActiveScaleSection(e.target.value as any)}
+                className="bg-transparent text-[10px] text-gray-300 font-mono outline-none cursor-pointer"
+              >
+                <option value="pills">Pills Zoom</option>
+                <option value="params">Params Zoom</option>
+                <option value="extranetworks">ExtraNet Zoom</option>
+                <option value="history">History Zoom</option>
+                <option value="controlnet">ControlNet Zoom</option>
+                <option value="adetailer">ADetailer Zoom</option>
+              </select>
+              <input
+                type="range"
+                min="75"
+                max="150"
+                step="5"
+                value={settings.sectionScales[activeScaleSection] || 100}
+                onChange={(e) => setSectionScale(activeScaleSection, Number(e.target.value))}
+                className="w-16 h-1 bg-[#252a36] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+              />
+              <span className="text-[10px] text-indigo-400 font-mono w-7 text-right">
+                {settings.sectionScales[activeScaleSection] || 100}%
+              </span>
+            </div>
 
-          <div className="relative">
+            {/* Settings Modal Toggle */}
             <button
-              onClick={() => setShowAddMenu(!showAddMenu)}
-              className="p-1 bg-[#1a1d26] hover:bg-indigo-600 hover:text-white border border-[#2b2f3a] text-gray-300 rounded cursor-pointer transition flex items-center gap-1 text-xs px-2"
+              onClick={() => setShowSettingsModal(true)}
+              className="p-1 bg-[#1a1d26] hover:bg-[#252a36] text-gray-300 rounded border border-[#2b2f3a] cursor-pointer"
+              title="Full App & State Settings"
             >
-              <Plus className="w-3.5 h-3.5" />
+              <Settings className="w-3.5 h-3.5" />
             </button>
 
-            {showAddMenu && (
-              <div className="absolute right-0 top-7 w-48 bg-[#181a22] border border-[#2b2f3a] rounded-lg shadow-2xl py-1 z-50 flex flex-col text-xs text-gray-200">
-                <button onClick={() => addPanel('adetailer', 'ADetailer')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
-                  <Sparkle className="w-3.5 h-3.5 text-amber-400" /> ADetailer
-                </button>
-                <button onClick={() => addPanel('controlnet', 'ControlNet')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
-                  <Layers className="w-3.5 h-3.5 text-indigo-400" /> ControlNet
-                </button>
-                <button onClick={() => addPanel('extranetworks', 'Extra Networks')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
-                  <Box className="w-3.5 h-3.5 text-emerald-400" /> Extra Networks
-                </button>
-                <button onClick={() => addPanel('history', 'Output History')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
-                  <HistoryIcon className="w-3.5 h-3.5 text-cyan-400" /> Output History
-                </button>
-                <button onClick={() => addPanel('imagesearch', 'Image Search')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
-                  <ImageIcon className="w-3.5 h-3.5 text-purple-400" /> Image Search
-                </button>
-                <div className="h-px bg-[#252a35] my-1" />
-                <button onClick={() => addPanel('params', 'Parameters')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white cursor-pointer">
-                  Parameters
-                </button>
-                <button onClick={() => addPanel('preview', 'Viewport')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white cursor-pointer">
-                  Viewport
-                </button>
-              </div>
-            )}
+            {/* Add Section Menu */}
+            <div className="relative">
+              <button
+                onClick={() => setShowAddMenu(!showAddMenu)}
+                className="p-1 bg-[#1a1d26] hover:bg-indigo-600 hover:text-white border border-[#2b2f3a] text-gray-300 rounded cursor-pointer transition flex items-center gap-1 text-xs px-2"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </button>
+
+              {showAddMenu && (
+                <div className="absolute right-0 top-7 w-48 bg-[#181a22] border border-[#2b2f3a] rounded-lg shadow-2xl py-1 z-50 flex flex-col text-xs text-gray-200">
+                  <button onClick={() => addPanel('adetailer', 'ADetailer')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <Sparkle className="w-3.5 h-3.5 text-amber-400" /> ADetailer
+                  </button>
+                  <button onClick={() => addPanel('controlnet', 'ControlNet')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <Layers className="w-3.5 h-3.5 text-indigo-400" /> ControlNet
+                  </button>
+                  <button onClick={() => addPanel('extranetworks', 'Extra Networks')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <Box className="w-3.5 h-3.5 text-emerald-400" /> Extra Networks
+                  </button>
+                  <button onClick={() => addPanel('history', 'Output History')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <HistoryIcon className="w-3.5 h-3.5 text-cyan-400" /> Output History
+                  </button>
+                  <button onClick={() => addPanel('imagesearch', 'Image Search')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <ImageIcon className="w-3.5 h-3.5 text-purple-400" /> Image Search
+                  </button>
+                  <div className="h-px bg-[#252a35] my-1" />
+                  <button onClick={() => addPanel('params', 'Parameters')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white cursor-pointer">
+                    Parameters
+                  </button>
+                  <button onClick={() => addPanel('preview', 'Viewport')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white cursor-pointer">
+                    Viewport
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       ) : (
@@ -1128,22 +1772,160 @@ export const Workspace: React.FC = () => {
         </div>
       )}
 
+      {/* Main Grid View */}
       <div className="flex-1 w-full min-h-0">
         <DockviewReact components={components} onReady={onReady} className="dockview-theme-dark h-full w-full" />
       </div>
 
+      {/* Resizable Divider */}
       <div
         onMouseDown={() => (isResizingBottom.current = true)}
         className="h-1.5 w-full bg-[#181b24] hover:bg-indigo-500 cursor-row-resize shrink-0 transition-colors z-20 border-t border-[#252a35]"
       />
 
+      {/* Bottom Section */}
       <div style={{ height: `${bottomHeight}px` }} className="w-full shrink-0 flex flex-col bg-[#0f1115]">
-        <PromptPillsPanel
-          api={{} as any}
-          containerApi={{} as any}
-          params={{}}
-        />
+        <PromptPillsPanel api={{} as any} containerApi={{} as any} params={{}} />
       </div>
+
+      {/* Settings Modal */}
+      {showSettingsModal && (
+        <div className="fixed inset-0 z-999999 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-[450px] max-h-[85vh] overflow-y-auto bg-[#161822] border border-[#2d3246] rounded-xl shadow-2xl p-4 text-xs text-gray-200 flex flex-col gap-3">
+            <div className="flex justify-between items-center border-b border-[#252a38] pb-2 font-semibold text-sm text-indigo-400">
+              <span className="flex items-center gap-2"><Settings className="w-4 h-4" /> Preferences & Customization</span>
+              <button onClick={() => setShowSettingsModal(false)} className="text-gray-500 hover:text-white text-base">✕</button>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <span className="font-mono text-[10px] text-gray-400 uppercase tracking-wider font-semibold">Prompt & Tag Customization</span>
+
+              <label className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded cursor-pointer">
+                <span>Auto-inject LoRA activation words on insert</span>
+                <input
+                  type="checkbox"
+                  checked={settings.autoInjectLoraTrigger}
+                  onChange={(e) => updateSettings({ autoInjectLoraTrigger: e.target.checked })}
+                  className="accent-indigo-500 w-4 h-4"
+                />
+              </label>
+
+              <label className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded cursor-pointer">
+                <span>Display '+' prefix before tag labels</span>
+                <input
+                  type="checkbox"
+                  checked={settings.showTagPlusPrefix}
+                  onChange={(e) => updateSettings({ showTagPlusPrefix: e.target.checked })}
+                  className="accent-indigo-500 w-4 h-4"
+                />
+              </label>
+
+              <label className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded cursor-pointer">
+                <span>Display post count badges on pills</span>
+                <input
+                  type="checkbox"
+                  checked={settings.showTagPostCounts}
+                  onChange={(e) => updateSettings({ showTagPostCounts: e.target.checked })}
+                  className="accent-indigo-500 w-4 h-4"
+                />
+              </label>
+
+              <label className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded cursor-pointer">
+                <span>Format tags with underscores instead of spaces</span>
+                <input
+                  type="checkbox"
+                  checked={settings.useUnderscores}
+                  onChange={(e) => updateSettings({ useUnderscores: e.target.checked })}
+                  className="accent-indigo-500 w-4 h-4"
+                />
+              </label>
+
+              <div className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded">
+                <span>Shift-Click weight increment step</span>
+                <select
+                  value={settings.tagClickWeightStep}
+                  onChange={(e) => updateSettings({ tagClickWeightStep: Number(e.target.value) })}
+                  className="bg-[#1a1d28] border border-[#2e3346] rounded px-2 py-0.5 text-xs text-gray-200 outline-none"
+                >
+                  <option value="0.05">+0.05</option>
+                  <option value="0.10">+0.10</option>
+                  <option value="0.15">+0.15</option>
+                  <option value="0.20">+0.20 (Default)</option>
+                  <option value="0.25">+0.25</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 border-t border-[#252a38] pt-2">
+              <span className="font-mono text-[10px] text-gray-400 uppercase tracking-wider font-semibold">State & Persistence</span>
+
+              <label className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded cursor-pointer">
+                <span>Preserve prompts & parameters across browser reloads</span>
+                <input
+                  type="checkbox"
+                  checked={settings.preservePromptsOnReload}
+                  onChange={(e) => updateSettings({ preservePromptsOnReload: e.target.checked })}
+                  className="accent-indigo-500 w-4 h-4"
+                />
+              </label>
+
+              <label className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded cursor-pointer">
+                <span>Randomize seed automatically when set to -1</span>
+                <input
+                  type="checkbox"
+                  checked={settings.randomizeSeedOnGen}
+                  onChange={(e) => updateSettings({ randomizeSeedOnGen: e.target.checked })}
+                  className="accent-indigo-500 w-4 h-4"
+                />
+              </label>
+
+              <label className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded cursor-pointer">
+                <span>Auto-save Dockview panel arrangements</span>
+                <input
+                  type="checkbox"
+                  checked={settings.autoSaveLayout}
+                  onChange={(e) => updateSettings({ autoSaveLayout: e.target.checked })}
+                  className="accent-indigo-500 w-4 h-4"
+                />
+              </label>
+
+              <div className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded">
+                <span>Maximum history records kept in memory</span>
+                <input
+                  type="number"
+                  min="10"
+                  max="200"
+                  step="10"
+                  value={settings.maxHistoryCount}
+                  onChange={(e) => updateSettings({ maxHistoryCount: Number(e.target.value) })}
+                  className="w-16 bg-[#1a1d28] border border-[#2e3346] rounded px-2 py-0.5 text-xs text-gray-200 font-mono outline-none"
+                />
+              </div>
+
+              <button
+                onClick={() => {
+                  localStorage.removeItem('swarm_canvas_persisted_store');
+                  localStorage.removeItem('swarm_dockview_layout');
+                  window.location.reload();
+                }}
+                className="w-full py-1.5 bg-rose-950/50 border border-rose-700/80 text-rose-300 rounded hover:bg-rose-900 transition cursor-pointer mt-2"
+              >
+                Reset All Stored State & Layout to Default
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {globalContextMenu && (
+        <CustomContextMenu
+          x={globalContextMenu.x}
+          y={globalContextMenu.y}
+          title={globalContextMenu.title}
+          items={globalContextMenu.items}
+          onClose={() => setGlobalContextMenu(null)}
+        />
+      )}
     </div>
   );
 };
