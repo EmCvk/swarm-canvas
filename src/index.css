@@ -28,3 +28,10 @@ html, body, #root {
 ::-webkit-scrollbar-thumb:hover {
   background: #4f46e5;
 }
+/* Smooth drag animations */
+.cursor-grab {
+  cursor: grab;
+}
+.cursor-grab:active {
+  cursor: grabbing;
+}

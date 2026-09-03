@@ -21,12 +21,12 @@ import { ModelPlaceholder } from './ModelPlaceholder';
 import {
   Wand2, Plus, Clock, Cpu, Gauge,
   RotateCw, Search, Layers, Sparkle, LayoutGrid,
-  Box, ZoomIn, ZoomOut, Maximize2,
+  Box, ZoomIn, ZoomOut, Maximize2, Minimize2,
   History as HistoryIcon, Image as ImageIcon,
   Grid, List, Sliders, ChevronLeft, ChevronRight,
   Settings, Copy, Trash2, ExternalLink, Download, ArrowUpRight,
   SplitSquareVertical, Globe, Check, ArrowLeftRight,
-  Dices, Lock, Unlock, AlertTriangle, Zap
+  Dices, Lock, Unlock, AlertTriangle, Zap, Eye, EyeOff,Terminal
 } from 'lucide-react';
 
 /* =========================================================================
@@ -100,11 +100,16 @@ const CO_OCCURRENCE_RULES: { triggers: string[]; suggestions: string[] }[] = [
    1. VIEWPORT CANVAS WITH A/B SPLIT-SLIDER & CONTEXT MENU
    ========================================================================= */
 const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
+  const store = useAppStore() as any;
   const {
     activeImage, livePreview, isGenerating, currentStep, maxSteps,
     progressPercent, metrics, setParams, comparisonImage, isComparing,
-    compareSplit, setIsComparing, setComparisonImage, setCompareSplit, history
-  } = useAppStore();
+    compareSplit, setIsComparing, setComparisonImage, setCompareSplit, history,
+    cancelGeneration
+  } = store;
+
+  const queue: any[] = store.queue || [];
+  const activeJob: any = store.activeJob || null;
 
   const displayImage = livePreview || activeImage;
 
@@ -116,6 +121,10 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
   const [isDraggingSlider, setIsDraggingSlider] = useState(false);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; title: string; items: ContextMenuItem[] } | null>(null);
+
+  // Viewport-specific widget toggles
+  const [isQueueOpen, setIsQueueOpen] = useState(false);
+  const [isProgressBarHidden, setIsProgressBarHidden] = useState(false);
 
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
@@ -214,6 +223,8 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
     setContextMenu({ x: e.clientX, y: e.clientY, title: 'Viewport Actions', items });
   };
 
+  const totalInQueue = queue.length + (isGenerating || activeJob ? 1 : 0);
+
   return (
     <div
       ref={canvasContainerRef}
@@ -233,7 +244,6 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
             transformOrigin: 'center center'
           }}
         >
-          {/* Main Image A */}
           <div className="relative max-h-[85vh] max-w-[85vw]">
             <img
               src={displayImage}
@@ -244,7 +254,6 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
               }`}
             />
 
-            {/* A/B Split Comparison Image (B) */}
             {isComparing && comparisonImage && (
               <>
                 <div
@@ -259,7 +268,6 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
                   />
                 </div>
 
-                {/* Draggable Divider Handle */}
                 <div
                   onMouseDown={(e) => {
                     e.stopPropagation();
@@ -287,8 +295,33 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
         <span className="text-neutral-600 text-xs">No image rendered yet</span>
       )}
 
-      {/* Floating Toolbar */}
-      <div className="absolute top-3 right-3 flex items-center gap-1 bg-[#14161f]/90 border border-[#2b2f3a] rounded-lg p-1 backdrop-blur-sm shadow-xl z-20">
+      {/* Floating Toolbar with Queue & Progress Bar Toggles */}
+      <div className="absolute top-3 right-3 flex items-center gap-1.5 bg-[#14161f]/90 border border-[#2b2f3a] rounded-lg p-1 backdrop-blur-sm shadow-xl z-20">
+        <button
+          onClick={() => setIsQueueOpen((prev) => !prev)}
+          className={`p-1 px-1.5 rounded cursor-pointer transition flex items-center gap-1 text-[11px] ${
+            isQueueOpen
+              ? 'bg-amber-600/30 text-amber-300 border border-amber-500/40'
+              : 'hover:bg-[#252a36] text-gray-300'
+          }`}
+          title="Toggle Viewport Queue Manager"
+        >
+          <Layers className="w-3.5 h-3.5 text-amber-400" />
+          <span className="font-mono text-[10px] font-semibold">{totalInQueue}</span>
+        </button>
+
+        <button
+          onClick={() => setIsProgressBarHidden((prev) => !prev)}
+          className={`p-1 rounded cursor-pointer transition ${
+            !isProgressBarHidden ? 'text-indigo-400 hover:bg-[#252a36]' : 'text-gray-500 hover:bg-[#252a36]'
+          }`}
+          title={isProgressBarHidden ? 'Show Progress Bar' : 'Hide Progress Bar'}
+        >
+          {isProgressBarHidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+        </button>
+
+        <div className="h-3 w-px bg-[#2b2f3a] mx-0.5" />
+
         <button
           onClick={() => {
             if (!isComparing && !comparisonImage && history.length > 0) {
@@ -306,53 +339,102 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
         <div className="h-3 w-px bg-[#2b2f3a] mx-0.5" />
 
-        <button onClick={() => setZoom((z) => Math.min(10, z + 0.25))} className="p-1 hover:bg-[#252a36] text-gray-300 rounded" title="Zoom In">
+        <button onClick={() => setZoom((z) => Math.min(10, z + 0.25))} className="p-1 hover:bg-[#252a36] text-gray-300 rounded cursor-pointer" title="Zoom In">
           <ZoomIn className="w-3.5 h-3.5" />
         </button>
         <span className="text-[10px] font-mono text-gray-400 px-1">{Math.round(zoom * 100)}%</span>
-        <button onClick={() => setZoom((z) => Math.max(0.1, z - 0.25))} className="p-1 hover:bg-[#252a36] text-gray-300 rounded" title="Zoom Out">
+        <button onClick={() => setZoom((z) => Math.max(0.1, z - 0.25))} className="p-1 hover:bg-[#252a36] text-gray-300 rounded cursor-pointer" title="Zoom Out">
           <ZoomOut className="w-3.5 h-3.5" />
         </button>
-        <button onClick={resetTransform} className="p-1 hover:bg-[#252a36] text-gray-300 rounded" title="Reset View">
+        <button onClick={resetTransform} className="p-1 hover:bg-[#252a36] text-gray-300 rounded cursor-pointer" title="Reset View">
           <Maximize2 className="w-3.5 h-3.5" />
         </button>
       </div>
 
-      {/* Comparison Selector Bar */}
-      {isComparing && (
-        <div className="absolute top-3 left-3 flex items-center gap-2 bg-[#14161f]/95 border border-indigo-500/40 rounded-lg p-1.5 backdrop-blur-md shadow-xl z-20 text-xs text-gray-200">
-          <span className="font-mono text-[10px] text-indigo-400 font-semibold">A/B Compare:</span>
-          <select
-            value={comparisonImage || ''}
-            onChange={(e) => setComparisonImage(e.target.value)}
-            className="bg-[#1b1e2a] border border-[#2d3246] rounded px-2 py-0.5 text-[11px] text-gray-200 outline-none max-w-xs truncate"
-          >
-            {history.map((h, i) => (
-              <option key={h.id} value={h.imageUrl}>
-                #{history.length - i}: {h.prompt.slice(0, 32)}... ({h.params.model.split('/').pop()})
-              </option>
-            ))}
-          </select>
-          <button
-            onClick={swapComparison}
-            className="p-1 hover:bg-[#252a36] text-indigo-300 rounded"
-            title="Swap A and B Images"
-          >
-            <ArrowLeftRight className="w-3 h-3" />
-          </button>
-          <span className="font-mono text-[10px] text-gray-400">{compareSplit}%</span>
-          <button
-            onClick={() => setIsComparing(false)}
-            className="p-0.5 text-gray-400 hover:text-white ml-1 cursor-pointer"
-            title="Close Comparison"
-          >
-            ✕
-          </button>
+      {/* Floating Viewport Queue Manager Modal */}
+      {isQueueOpen && (
+        <div className="absolute top-12 right-3 w-72 max-h-80 bg-[#12141c]/95 border border-[#2b2f3a] rounded-xl shadow-2xl backdrop-blur-md flex flex-col z-30 overflow-hidden text-xs">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-[#252a35] bg-[#161822]">
+            <div className="flex items-center gap-1.5 font-semibold text-gray-200">
+              <Layers className="w-3.5 h-3.5 text-amber-400" />
+              <span>Viewport Queue</span>
+              <span className="px-1.5 py-0.2 bg-amber-500/20 text-amber-300 text-[10px] font-mono rounded-full">
+                {totalInQueue}
+              </span>
+            </div>
+            <div className="flex items-center gap-1">
+              {queue.length > 0 && store.clearQueue && (
+                <button
+                  onClick={() => store.clearQueue()}
+                  className="p-1 text-gray-400 hover:text-rose-400 rounded cursor-pointer"
+                  title="Clear Queue"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              )}
+              <button
+                onClick={() => setIsQueueOpen(false)}
+                className="p-1 text-gray-400 hover:text-white rounded cursor-pointer"
+                title="Close"
+              >
+                <Minimize2 className="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-2.5 divide-y divide-[#202432] space-y-2">
+            {isGenerating || activeJob ? (
+              <div className="pb-1.5">
+                <div className="flex items-center justify-between text-[10px] font-semibold text-indigo-300 mb-1">
+                  <span className="flex items-center gap-1 font-mono">
+                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
+                    RUNNING {currentStep ? `(${currentStep}/${maxSteps})` : ''}
+                  </span>
+                  <button
+                    onClick={() => cancelGeneration && cancelGeneration()}
+                    className="px-1.5 py-0.5 rounded bg-rose-600/30 hover:bg-rose-600 text-rose-200 text-[9px] font-mono cursor-pointer transition"
+                  >
+                    Interrupt
+                  </button>
+                </div>
+                <p className="text-[11px] text-gray-300 truncate font-mono">
+                  {activeJob?.prompt || store.prompt || 'Current Task'}
+                </p>
+              </div>
+            ) : null}
+
+            {queue.length === 0 && !isGenerating && !activeJob ? (
+              <div className="py-6 text-center text-gray-500 text-[11px] flex flex-col items-center justify-center gap-1">
+                <Sparkle className="w-4 h-4 text-gray-600" />
+                <span>No jobs in queue</span>
+              </div>
+            ) : (
+              queue.map((item: any, idx: number) => (
+                <div key={item.id || idx} className="pt-1.5 flex items-center justify-between gap-1 text-[11px]">
+                  <div className="flex-1 min-w-0">
+                    <span className="font-mono text-amber-400 text-[10px] mr-1">#{idx + 1}</span>
+                    <span className="text-gray-300 truncate font-mono inline-block max-w-[170px] align-bottom">
+                      {item.prompt || 'Queued generation'}
+                    </span>
+                  </div>
+                  {store.cancelQueuedJob && (
+                    <button
+                      onClick={() => store.cancelQueuedJob(item.id)}
+                      className="p-1 text-gray-500 hover:text-rose-400 cursor-pointer"
+                      title="Remove from queue"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
         </div>
       )}
 
-      {/* Live Analytics Progress Bar */}
-      {(isGenerating || metrics.totalTime > 0) && (
+      {/* Live Analytics Progress Bar (With Hide Toggle) */}
+      {(isGenerating || metrics.totalTime > 0) && !isProgressBarHidden && (
         <div className="absolute bottom-4 left-4 right-4 bg-[#121418]/95 border border-[#2b2f3a] p-3 rounded-lg shadow-2xl backdrop-blur-md z-20">
           <div className="flex flex-wrap items-center justify-between text-xs text-gray-300 mb-2 gap-2">
             <div className="flex items-center gap-2 font-mono">
@@ -373,6 +455,13 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
                 <span className="flex items-center gap-1 text-indigo-400 font-semibold"><Clock className="w-3.5 h-3.5" /> ETA: ~{metrics.eta}s</span>
               )}
               <span className="flex items-center gap-1 text-gray-200 font-medium">Total: {metrics.totalTime}s</span>
+              <button
+                onClick={() => setIsProgressBarHidden(true)}
+                className="p-1 hover:bg-[#202430] text-gray-400 hover:text-white rounded cursor-pointer transition ml-1"
+                title="Hide Progress Bar"
+              >
+                <Minimize2 className="w-3 h-3" />
+              </button>
             </div>
           </div>
           <div className="w-full bg-[#1a1d24] h-2 rounded-full overflow-hidden border border-neutral-800">
@@ -411,14 +500,27 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   const [hoverDetail, setHoverDetail] = useState<TagDetail | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; title: string; items: ContextMenuItem[] } | null>(null);
-
   const [lockedStages, setLockedStages] = useState<Record<string, boolean>>({});
+
+  // Fix: Subscribe to asynchronous tag loading so categories and tags populate immediately upon loading
+  const [, setTagLoadTick] = useState(0);
+
+  useEffect(() => {
+    const unsub = danbooru.onLoaded ? danbooru.onLoaded(() => {
+      setTagLoadTick((t) => t + 1);
+      danbooru.getTags(activeMacroCategory, activeSubCategory, pillSearchQuery, tagDisplayLimit).then((tags: string[]) => {
+        if (tags && tags.length > 0) setCurrentTags(tags);
+      });
+    }) : () => {};
+
+    return () => unsub();
+  }, [activeMacroCategory, activeSubCategory, pillSearchQuery, tagDisplayLimit]);
 
   const parentScrollRef = useRef<HTMLDivElement>(null);
   const subScrollRef = useRef<HTMLDivElement>(null);
 
-  const parentCategories = danbooru.getParentCategories();
-  const subCategories = danbooru.getSubCategories(activeMacroCategory);
+  const parentCategories = useMemo(() => danbooru.getParentCategories(), [activeMacroCategory, tagDisplayLimit]);
+  const subCategories = useMemo(() => danbooru.getSubCategories(activeMacroCategory), [activeMacroCategory]);
 
   useEffect(() => {
     setTagDisplayLimit(300);
@@ -426,8 +528,8 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
   useEffect(() => {
     let active = true;
-    danbooru.getTags(activeMacroCategory, activeSubCategory, pillSearchQuery, tagDisplayLimit).then((tags) => {
-      if (active) setCurrentTags(tags);
+    danbooru.getTags(activeMacroCategory, activeSubCategory, pillSearchQuery, tagDisplayLimit).then((tags: string[]) => {
+      if (active) setCurrentTags(tags || []);
     });
     return () => {
       active = false;
@@ -448,8 +550,8 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   };
 
   const removeTokenFromPrompt = (tokenToRemove: string) => {
-    const tokens = prompt.split(',').map((t) => t.trim()).filter(Boolean);
-    const filtered = tokens.filter((t) => !t.toLowerCase().includes(tokenToRemove.toLowerCase().replace(/_/g, ' ')));
+    const tokens = prompt.split(',').map((t: string) => t.trim()).filter(Boolean);
+    const filtered = tokens.filter((t: string) => !t.toLowerCase().includes(tokenToRemove.toLowerCase().replace(/_/g, ' ')));
     setPrompt(filtered.join(', '));
   };
 
@@ -490,13 +592,13 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     if (lockedStages[stage]) return;
     const picked = await danbooru.getRandomTags(stage, 2);
     if (picked && picked.length > 0) {
-      picked.forEach((t) => appendTag(t, 'positive', 1.0));
+      picked.forEach((t: string) => appendTag(t, 'positive', 1.0));
     }
   };
 
   const handleApplyStageWeight = (stage: string, weightMult: number) => {
-    const tokens = prompt.split(',').map((t) => t.trim()).filter(Boolean);
-    const updated = tokens.map((token) => {
+    const tokens = prompt.split(',').map((t: string) => t.trim()).filter(Boolean);
+    const updated = tokens.map((token: string) => {
       const clean = token.replace(/[\(\):0-9.]/g, '').trim();
       return `(${clean}:${weightMult.toFixed(2)})`;
     });
@@ -562,9 +664,14 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     >
       {/* Top Prompt Textboxes & Generate Button */}
       <div className="p-2 border-b border-[#232631] bg-[#12141a] flex flex-col gap-2 shrink-0">
-        <div className="flex gap-2 h-20">
-          <div className="flex-1 flex flex-col" onClick={() => setActiveTarget('positive')}>
-            <div className="flex justify-between items-center mb-1">
+        <div className="flex flex-wrap items-start gap-2 min-h-[90px]">
+          {/* 2D Resizable Positive Box */}
+          <div
+            style={{ resize: 'both' }}
+            className="flex-1 min-w-[240px] min-h-[85px] overflow-auto flex flex-col"
+            onClick={() => setActiveTarget('positive')}
+          >
+            <div className="flex justify-between items-center mb-1 shrink-0">
               <span className={`font-mono text-[11px] font-semibold ${activeTarget === 'positive' ? 'text-indigo-400' : 'text-gray-400'}`}>
                 Positive Prompt
               </span>
@@ -578,8 +685,13 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             />
           </div>
 
-          <div className="w-1/3 flex flex-col" onClick={() => setActiveTarget('negative')}>
-            <div className="flex justify-between items-center mb-1">
+          {/* 2D Resizable Negative Box */}
+          <div
+            style={{ resize: 'both' }}
+            className="w-1/3 min-w-[200px] min-h-[85px] overflow-auto flex flex-col"
+            onClick={() => setActiveTarget('negative')}
+          >
+            <div className="flex justify-between items-center mb-1 shrink-0">
               <span className={`font-mono text-[11px] font-semibold ${activeTarget === 'negative' ? 'text-rose-400' : 'text-gray-400'}`}>
                 Negative Prompt
               </span>
@@ -593,30 +705,39 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             />
           </div>
 
-          <div className="w-28 flex flex-col justify-end">
-            {isGenerating ? (
+          {/* Generation Trigger */}
+          {/* Generate & Queue Buttons */}
+          <div className="w-28 flex flex-col gap-1 justify-end self-stretch">
+            {isGenerating && (
               <button
                 onClick={cancelGeneration}
-                className="w-full h-full max-h-14 bg-rose-600 hover:bg-rose-500 font-semibold rounded text-white text-xs cursor-pointer shadow-lg transition flex items-center justify-center gap-1"
+                className="w-full h-7 bg-rose-600 hover:bg-rose-500 font-semibold rounded text-white text-[10px] cursor-pointer shadow-lg transition flex items-center justify-center gap-1"
               >
                 Cancel
               </button>
-            ) : (
-              <button
-                disabled={!model}
-                onClick={enqueueAndProcess}
-                className={`w-full h-full max-h-14 font-semibold rounded text-white text-xs cursor-pointer shadow-lg transition flex flex-col items-center justify-center gap-1 ${
-                  !model
-                    ? 'bg-neutral-700 cursor-not-allowed text-neutral-400'
-                    : 'bg-indigo-600 hover:bg-indigo-500 shadow-indigo-600/30'
-                }`}
-              >
-                <Wand2 className="w-3.5 h-3.5" />
-                <span>Generate</span>
-              </button>
             )}
+            <button
+              onClick={enqueueAndProcess}
+              className="w-full flex-1 font-semibold rounded text-white text-xs cursor-pointer shadow-lg transition flex flex-col items-center justify-center gap-0.5 bg-indigo-600 hover:bg-indigo-500 shadow-indigo-600/30"
+              title="Start Generation / Run immediately"
+            >
+              <Wand2 className="w-3.5 h-3.5" />
+              <span>Generate</span>
+            </button>
+            <button
+              onClick={() => {
+                // Enqueue job without interrupting current generation
+                useAppStore.getState().enqueueAndProcess();
+              }}
+              className="w-full h-7 bg-[#202432] hover:bg-[#2b3042] border border-[#3b4156] font-mono text-[10px] text-amber-300 hover:text-amber-200 rounded cursor-pointer transition flex items-center justify-center gap-1"
+              title="Add task to background queue"
+            >
+              <Plus className="w-3 h-3" />
+              <span>+ Queue</span>
+            </button>
           </div>
         </div>
+        
 
         {/* Real-time Conflict Linter Banner */}
         {detectedConflicts.length > 0 && (
@@ -645,7 +766,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
           </div>
         )}
 
-        {/* Dynamic Contextual Cascading: Suggested Next Tags */}
+        {/* Suggested Next Tags */}
         {suggestedNextTags.length > 0 && (
           <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none py-0.5">
             <span className="text-[10px] font-mono text-cyan-400 flex items-center gap-0.5 shrink-0 font-semibold">
@@ -666,7 +787,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
       {/* Two-Tier Tag Browser with Visual Stepper */}
       <div className="flex-1 flex flex-col min-h-0 bg-[#0c0d12]">
-        {/* Tier 1: Visual Stage Stepper with Chevrons */}
         <div className="flex items-center bg-[#111318] border-b border-[#20232c] px-1">
           <button
             onClick={() => parentScrollRef.current && (parentScrollRef.current.scrollLeft -= 220)}
@@ -680,7 +800,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             onWheel={(e) => handleWheelHorizontal(parentScrollRef, e)}
             className="flex-1 flex gap-1.5 overflow-x-auto p-1.5 scrollbar-none scroll-smooth"
           >
-            {parentCategories.map((parent) => {
+            {parentCategories.map((parent: string) => {
               const count = danbooru.getParentCount(parent);
               const isActive = activeMacroCategory === parent;
               const style = STAGE_COLOR_STYLES[parent] || { border: 'border-indigo-500/30', bg: 'bg-indigo-600', text: 'text-indigo-300' };
@@ -716,7 +836,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
           </button>
         </div>
 
-        {/* Tier 2: Subcategories + Stage Tools (Roll, Lock, Weight) */}
+        {/* Tier 2: Subcategories */}
         <div className="flex items-center gap-2 p-1.5 border-b border-[#20232c] bg-[#13151b]">
           <div className="relative w-44 shrink-0">
             <Search className="w-3 h-3 absolute left-2 top-2 text-gray-400" />
@@ -729,7 +849,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             />
           </div>
 
-          {/* Stage Tool Actions (Roll 🎲, Lock 🔒, Weight) */}
           <div className="flex items-center gap-1 shrink-0 border-r border-[#262a36] pr-2">
             <button
               onClick={() => handleRollStageRandomTags(activeMacroCategory)}
@@ -778,7 +897,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             onWheel={(e) => handleWheelHorizontal(subScrollRef, e)}
             className="flex-1 flex gap-1 overflow-x-auto scrollbar-none scroll-smooth"
           >
-            {subCategories.map((sub) => {
+            {subCategories.map((sub: string) => {
               const count = danbooru.getSubCount(activeMacroCategory, sub);
               const isActive = activeSubCategory === sub;
               return (
@@ -808,7 +927,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
           </button>
         </div>
 
-        {/* Tier 3: Tags Grid with Color Styling & Pagination */}
+        {/* Tier 3: Tags Grid */}
         <div className="flex-1 p-2 overflow-y-auto content-start flex flex-wrap gap-1.5 bg-[#0a0b0e]">
           {currentTags.length === 0 ? (
             <span className="text-gray-600 m-auto text-xs">
@@ -816,7 +935,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             </span>
           ) : (
             <>
-              {currentTags.map((tag) => {
+              {currentTags.map((tag: string) => {
                 const count = danbooru.getPostCount(tag);
                 return (
                   <div
@@ -1765,6 +1884,47 @@ export const Workspace: React.FC = () => {
     setNegativePrompt
   } = useAppStore();
 
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({
+    bottomTray: false,
+  });
+
+  const toggleSectionCollapse = (key: string) => {
+    setCollapsedSections((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+  // Debug Console State & Interceptor
+  const [showConsole, setShowConsole] = useState(false);
+  const [consoleLogs, setConsoleLogs] = useState<Array<{ time: string; type: 'log' | 'warn' | 'error'; msg: string }>>([]);
+
+  useEffect(() => {
+    const origLog = console.log;
+    const origWarn = console.warn;
+    const origError = console.error;
+
+    const pushLog = (type: 'log' | 'warn' | 'error', args: any[]) => {
+      const formatted = args
+        .map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a)))
+        .join(' ');
+      setConsoleLogs((prev) => [
+        ...prev.slice(-150),
+        {
+          time: new Date().toLocaleTimeString(),
+          type,
+          msg: formatted,
+        },
+      ]);
+    };
+
+    console.log = (...args: any[]) => { pushLog('log', args); origLog(...args); };
+    console.warn = (...args: any[]) => { pushLog('warn', args); origWarn(...args); };
+    console.error = (...args: any[]) => { pushLog('error', args); origError(...args); };
+
+    return () => {
+      console.log = origLog;
+      console.warn = origWarn;
+      console.error = origError;
+    };
+  }, []);
+
   const [dockApi, setDockApi] = useState<DockviewApi | null>(null);
   const [isTopBarCollapsed, setIsTopBarCollapsed] = useState(false);
   const [showAddMenu, setShowAddMenu] = useState(false);
@@ -1946,7 +2106,7 @@ export const Workspace: React.FC = () => {
             <div className="flex items-center gap-2 bg-[#181b24] border border-[#2b2f3a] px-2 py-0.5 rounded-md">
               <Sliders className="w-3 h-3 text-gray-400" />
               <select
-                value={activeScaleSection}
+                value={String(activeScaleSection)}
                 onChange={(e) => setActiveScaleSection(e.target.value as any)}
                 className="bg-transparent text-[10px] text-gray-300 font-mono outline-none cursor-pointer"
               >
@@ -1977,6 +2137,13 @@ export const Workspace: React.FC = () => {
               title="Full App & State Settings"
             >
               <Settings className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={() => setShowConsole(true)}
+              className="p-1 bg-[#1a1d26] hover:bg-[#252a36] text-indigo-400 hover:text-white rounded border border-[#2b2f3a] cursor-pointer"
+              title="Open Debug Console">
+              <Terminal className="w-3.5 h-3.5" />
             </button>
 
             <div className="relative">
@@ -2041,8 +2208,22 @@ export const Workspace: React.FC = () => {
       />
 
       {/* Bottom Tray */}
-      <div style={{ height: `${bottomHeight}px` }} className="w-full shrink-0 flex flex-col bg-[#0f1115]">
-        <PromptPillsPanel api={{} as any} containerApi={{} as any} params={{}} />
+      {/* Bottom Tray with Border Collapse Button */}
+      <div className="relative shrink-0 flex flex-col bg-[#0f1115] border-t border-[#252a35]">
+        <button
+          type="button"
+          onClick={() => toggleSectionCollapse('bottomTray')}
+          className="absolute -top-3 left-1/2 -translate-x-1/2 z-30 px-3 py-0.5 bg-[#181b24] border border-[#3b4254] hover:bg-indigo-600 hover:text-white rounded-full text-[10px] font-mono text-gray-300 shadow-md cursor-pointer transition flex items-center gap-1"
+          title={collapsedSections.bottomTray ? 'Expand Prompt Panel' : 'Collapse Prompt Panel'}
+        >
+          <span>{collapsedSections.bottomTray ? '▲ Expand Prompts' : '▼ Collapse Prompts'}</span>
+        </button>
+
+        {!collapsedSections.bottomTray && (
+          <div style={{ height: `${bottomHeight}px` }} className="w-full flex flex-col">
+            <PromptPillsPanel api={{} as any} containerApi={{} as any} params={{}} />
+          </div>
+        )}
       </div>
 
       {/* Settings Modal with Categorization Engine Switcher */}
@@ -2220,6 +2401,7 @@ export const Workspace: React.FC = () => {
           </div>
         </div>
       )}
+      
 
       {globalContextMenu && (
         <CustomContextMenu
@@ -2230,6 +2412,59 @@ export const Workspace: React.FC = () => {
           onClose={() => setGlobalContextMenu(null)}
         />
       )}
+
+      {/* In-App Debug Console Modal */}
+      {showConsole && (
+        <div className="fixed inset-0 z-[999999] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-[720px] h-[480px] bg-[#0c0d12] border border-[#2d3246] rounded-xl shadow-2xl flex flex-col text-xs text-zinc-300 font-mono overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-2 bg-[#141620] border-b border-[#252a38]">
+              <div className="flex items-center gap-2 text-indigo-400 font-semibold">
+                <Terminal className="w-4 h-4" />
+                <span>SwarmCanvas Debug Console</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setConsoleLogs([])}
+                  className="px-2 py-0.5 bg-[#1f2230] hover:bg-zinc-800 rounded text-[10px] text-zinc-400 hover:text-white cursor-pointer"
+                >
+                  Clear
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowConsole(false)}
+                  className="text-zinc-500 hover:text-white px-1 text-sm font-sans cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 p-3 overflow-y-auto space-y-1.5 bg-[#090a0f]">
+              {consoleLogs.length === 0 ? (
+                <span className="text-zinc-600">Console is clear. No errors or messages logged.</span>
+              ) : (
+                consoleLogs.map((log: { time: string; type: 'log' | 'warn' | 'error'; msg: string }, index: number) => (
+                  <div
+                    key={index}
+                    className={`flex items-start gap-2 leading-relaxed ${
+                      log.type === 'error'
+                        ? 'text-rose-400'
+                        : log.type === 'warn'
+                        ? 'text-amber-300'
+                        : 'text-zinc-300'
+                    }`}
+                  >
+                    <span className="text-zinc-600 shrink-0 text-[10px]">[{log.time}]</span>
+                    <span className="break-all">{log.msg}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+    
   );
 };

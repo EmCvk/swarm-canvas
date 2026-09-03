@@ -43,9 +43,6 @@ function isMeaninglessTag(rawTag: string): boolean {
   return false;
 }
 
-// -------------------------------------------------------------
-// Pure Biological & Mythical Animals Only (Excluding Anthro / Costumes)
-// -------------------------------------------------------------
 const PURE_CREATURE_SUBCATS: Record<string, string[]> = {
   'Felines & Big Cats': [
     'cat', 'kitten', 'lion', 'tiger', 'leopard', 'cheetah', 'panther',
@@ -326,7 +323,6 @@ function buildPromptFlowHierarchy(rawJson: any) {
       continue;
     }
 
-    // Pure Animal / Creature Classification
     const creatureSub = matchPureCreatureSubcat(rawTag, '0');
     if (creatureSub) {
       if (!clean['3. Animals & Creatures'][creatureSub]) {
@@ -364,6 +360,21 @@ function buildPromptFlowHierarchy(rawJson: any) {
         clean['13. Themes, Lore & Adult']['General Concepts (<10k)'].push(rawTag);
         metaMap.set(keyNorm, { parent: '13. Themes, Lore & Adult', sub: 'General Concepts (<10k)' });
       }
+    }
+  }
+
+  // Fallback: If rawJson categories weren't formatted as expected, ensure all CSV tags are mapped into Prompt-Flow categories
+  if (Object.keys(rawTags).length === 0 && allCsvTagsList.length > 0) {
+    for (const rawTag of allCsvTagsList) {
+      const keyNorm = rawTag.toLowerCase().replace(/\s+/g, '_');
+      if (metaMap.has(keyNorm)) continue;
+      const count = tagLookup.get(keyNorm)?.count || 0;
+      const targetSub = count >= 50000 ? 'General Concepts (50k+)' : 'General Concepts (<10k)';
+      if (!clean['13. Themes, Lore & Adult'][targetSub]) {
+        clean['13. Themes, Lore & Adult'][targetSub] = [];
+      }
+      clean['13. Themes, Lore & Adult'][targetSub].push(rawTag);
+      metaMap.set(keyNorm, { parent: '13. Themes, Lore & Adult', sub: targetSub });
     }
   }
 
@@ -459,6 +470,11 @@ function buildDanbooruTypesHierarchy(rawJson: any) {
       metaTagsList.push(rawTag);
       metaMap.set(keyNorm, { parent: 'Meta', sub: 'Technical & Medium' });
     }
+  }
+
+  // Fallback: If rawTags were empty, populate General from allCsvTagsList
+  if (Object.keys(rawTags).length === 0 && allCsvTagsList.length > 0) {
+    clean['General']['All Tags'] = allCsvTagsList;
   }
 
   const topSeries = Object.entries(charSeriesCounts)
@@ -633,7 +649,8 @@ self.onmessage = async (e: MessageEvent) => {
 
   if (type === 'SEARCH') {
     const { query, limit = 8 } = payload;
-    const q = (query || '').toLowerCase().replace(/\s+/g, '_');
+    const q = (query || '').toLowerCase().trim().replace(/\s+/g, '_');
+    const qSpace = q.replace(/_/g, ' ');
     if (!q) {
       self.postMessage({ id, success: true, data: [] });
       return;
@@ -641,8 +658,9 @@ self.onmessage = async (e: MessageEvent) => {
 
     const matches: AutocompleteItem[] = [];
     for (const item of tagIndex) {
-      const norm = item.tag.toLowerCase().replace(/\s+/g, '_');
-      if (norm.startsWith(q) || norm.includes(q)) {
+      const norm = item.tag.toLowerCase();
+      const normSpace = norm.replace(/_/g, ' ');
+      if (norm.includes(q) || normSpace.includes(qSpace)) {
         matches.push(item);
         if (matches.length >= limit) break;
       }
@@ -681,9 +699,14 @@ self.onmessage = async (e: MessageEvent) => {
       }
     }
 
-    if (search.trim()) {
+    if (search && search.trim()) {
       const q = search.trim().toLowerCase().replace(/\s+/g, '_');
-      list = list.filter((t) => t.toLowerCase().replace(/\s+/g, '_').includes(q));
+      const qSpace = q.replace(/_/g, ' ');
+      list = list.filter((t) => {
+        const lower = t.toLowerCase();
+        const lowerSpace = lower.replace(/_/g, ' ');
+        return lower.includes(q) || lowerSpace.includes(qSpace);
+      });
     }
 
     const sorted = list
