@@ -1,141 +1,137 @@
-import { CUSTOM_CATEGORIES, CUSTOM_DESCRIPTIONS, CUSTOM_POST_COUNTS } from './customTagDatabase';
-
-export type CategorizationMode = 'prompt_flow' | 'danbooru_types' | 'danbooru_groups';
-export type SortMode = 'alphabetical' | 'popularity';
+import type { CategorizationMode, SortMode } from '../workers/tagDatabaseWorker';
+export type { CategorizationMode, SortMode };
 
 export interface TagDetail {
   tag: string;
   subCategory: string;
   postCount: number | null;
   description?: string;
+  nativeCategory?: string;
+  nativeCategoryCode?: string;
+  wikiCategory?: string | null;
+  uiCategory?: string;
+  uiSubCategory?: string;
+  uiSubSubCategory?: string | null;
+  modeParent?: string;
+  modeSub?: string;
 }
 
 export interface AutocompleteItem {
   name: string;
   category?: string;
-  count?: number;
+  count?: number | null;
 }
 
-class DanbooruCustomService {
-  private stages = CUSTOM_CATEGORIES;
-  private postCounts = new Map<string, number>(Object.entries(CUSTOM_POST_COUNTS));
-  private descriptions = new Map<string, string>(Object.entries(CUSTOM_DESCRIPTIONS));
-  private loaded = true;
+interface Stats {
+  parentCategories: string[];
+  parentCounts: Record<string, number>;
+  subCounts: Record<string, Record<string, number>>;
+  totalTags: number;
+}
 
-  constructor() {}
+interface Pending { resolve: (value:any)=>void; reject: (reason:any)=>void }
 
-  public isReady(): boolean {
-    return this.loaded;
+class DanbooruService {
+  private worker: Worker;
+  private pending = new Map<number,Pending>();
+  private nextId = 1;
+  private loaded = false;
+  private callbacks = new Set<() => void>();
+  private stats: Stats = { parentCategories: [], parentCounts: {}, subCounts: {}, totalTags: 0 };
+
+  constructor() {
+    this.worker = new Worker(new URL('../workers/tagDatabaseWorker.ts', import.meta.url), { type: 'module' });
+    this.worker.onmessage = (event: MessageEvent) => {
+      const { id, success, data, error } = event.data;
+      const pending = this.pending.get(id);
+      if (!pending) return;
+      this.pending.delete(id);
+      if (success) pending.resolve(data); else pending.reject(new Error(error || 'Tag worker request failed'));
+    };
+    this.worker.onerror = (event) => {
+      console.error('[Danbooru] worker error', event);
+    };
+    void this.init();
   }
+
+  private request<T>(type: string, payload: Record<string,any> = {}): Promise<T> {
+    return new Promise<T>((resolve,reject) => {
+      const id = this.nextId++;
+      this.pending.set(id,{resolve,reject});
+      this.worker.postMessage({id,type,payload});
+    });
+  }
+
+  private async init() {
+    try {
+      this.stats = await this.request<Stats>('INIT');
+      this.loaded = true;
+      for (const cb of this.callbacks) cb();
+      this.callbacks.clear();
+    } catch (error) {
+      console.error('[Danbooru] failed to load local tag database', error);
+    }
+  }
+
+  public isReady(): boolean { return this.loaded; }
 
   public onLoaded(cb: () => void): () => void {
-    cb();
-    return () => {};
+    if (this.loaded) cb(); else this.callbacks.add(cb);
+    return () => this.callbacks.delete(cb);
   }
 
-  public getParentCategories(): string[] {
-    return Object.keys(this.stages);
-  }
-
-  public getSubCategories(parent: string): string[] {
-    const pData = this.stages[parent];
-    if (!pData) return ['All'];
-    return ['All', ...Object.keys(pData)];
-  }
-
-  public getParentCount(parent: string): number {
-    const pData = this.stages[parent];
-    if (!pData) return 0;
-    const unique = new Set<string>();
-    Object.values(pData).forEach((arr) => arr.forEach((t) => unique.add(t)));
-    return unique.size;
-  }
-
-  public getSubCount(parent: string, sub: string): number {
-    const pData = this.stages[parent];
-    if (!pData) return 0;
-    if (sub === 'All') return this.getParentCount(parent);
-    return pData[sub]?.length || 0;
-  }
+  public getParentCategories(): string[] { return this.stats.parentCategories; }
+  public getSubCategories(parent: string): string[] { return ['All', ...Object.keys(this.stats.subCounts[parent] || {}).filter(s => s !== 'All')]; }
+  public getParentCount(parent: string): number { return this.stats.parentCounts[parent] ?? 0; }
+  public getSubCount(parent: string, sub: string): number { return this.stats.subCounts[parent]?.[sub] ?? 0; }
 
   public getPostCount(tag: string): number | null {
-    const clean = tag.toLowerCase().replace(/\s+/g, '_');
-    return this.postCounts.get(clean) ?? 50000;
+    // Synchronous count access is retained for existing callers. Counts that are
+    // not already known should use getTagDetail/getCount, which are worker-backed.
+    return null;
   }
 
   public async getTags(parent: string, sub: string, search = '', limit = 300): Promise<string[]> {
-    const pData = this.stages[parent];
-    let list: string[] = [];
-
-    if (!pData) {
-      // Flatten all categories if parent not found
-      const all: string[] = [];
-      Object.values(this.stages).forEach((subObj) => {
-        Object.values(subObj).forEach((arr) => all.push(...arr));
-      });
-      list = all;
-    } else if (sub === 'All' || !sub) {
-      const set = new Set<string>();
-      Object.values(pData).forEach((arr) => arr.forEach((t) => set.add(t)));
-      list = Array.from(set);
-    } else {
-      list = pData[sub] || [];
-    }
-
-    if (search.trim()) {
-      const q = search.toLowerCase().replace(/\s+/g, '_');
-      const qSpace = q.replace(/_/g, ' ');
-      list = list.filter((t) => {
-        const lower = t.toLowerCase();
-        return lower.includes(q) || lower.replace(/_/g, ' ').includes(qSpace);
-      });
-    }
-
-    list.sort((a, b) => a.localeCompare(b));
-    return list.slice(0, limit);
+    return this.request<string[]>('GET_TAGS',{parent,sub,search,limit});
   }
 
   public async getTagDetail(tag: string, currentParent?: string, currentSub?: string): Promise<TagDetail> {
-    const clean = tag.toLowerCase().replace(/\s+/g, '_');
+    const detail = await this.request<any>('GET_DETAIL',{tag,currentParent,currentSub});
+    if (!detail) {
+      return { tag, subCategory: currentSub || currentParent || 'General', postCount: null };
+    }
     return {
-      tag,
-      subCategory: currentSub && currentSub !== 'All' ? currentSub : (currentParent || 'General'),
-      postCount: this.getPostCount(clean),
-      description: this.descriptions.get(clean) || `Keyword definition for ${tag.replace(/_/g, ' ')}.`,
+      tag: detail.tag,
+      subCategory: detail.modeSub,
+      postCount: detail.postCount,
+      description: detail.description || undefined,
+      nativeCategory: detail.nativeCategory,
+      nativeCategoryCode: detail.nativeCategoryCode,
+      wikiCategory: detail.wikiCategory,
+      uiCategory: detail.uiCategory,
+      uiSubCategory: detail.uiSubCategory,
+      uiSubSubCategory: detail.uiSubSubCategory,
+      modeParent: detail.modeParent,
+      modeSub: detail.modeSub
     };
   }
 
   public async searchAutocomplete(query: string, limit = 8): Promise<AutocompleteItem[]> {
-    const q = (query || '').toLowerCase().trim().replace(/\s+/g, '_');
-    if (!q) return [];
-
-    const all: string[] = [];
-    Object.values(this.stages).forEach((subObj) => {
-      Object.values(subObj).forEach((arr) => all.push(...arr));
-    });
-
-    const matches: AutocompleteItem[] = [];
-    for (const name of all) {
-      if (name.toLowerCase().includes(q) || name.toLowerCase().replace(/_/g, ' ').includes(q)) {
-        matches.push({
-          name,
-          category: 'General',
-          count: this.getPostCount(name) || 1000,
-        });
-        if (matches.length >= limit) break;
-      }
-    }
-    return matches;
+    const items = await this.request<Array<{name:string;category:string;count:number|null}>>('SEARCH',{query,limit});
+    return items.map(item => ({ name:item.name, category:item.category, count:item.count }));
   }
 
   public async getRandomTags(parent: string, count = 2): Promise<string[]> {
-    const all = await this.getTags(parent, 'All', '', 9999);
-    if (!all.length) return [];
-    return [...all].sort(() => 0.5 - Math.random()).slice(0, count);
+    return this.request<string[]>('GET_RANDOM_TAGS',{parent,count});
   }
 
-  public async setCategorizationMode(_mode: CategorizationMode): Promise<void> {}
-  public async setSortMode(_mode: SortMode): Promise<void> {}
+  public async setCategorizationMode(mode: CategorizationMode): Promise<void> {
+    this.stats = await this.request<Stats>('SET_MODE',{mode});
+  }
+
+  public async setSortMode(sort: SortMode): Promise<void> {
+    await this.request('SET_SORT',{sort});
+  }
 }
 
-export const danbooru = new DanbooruCustomService();
+export const danbooru = new DanbooruService();
