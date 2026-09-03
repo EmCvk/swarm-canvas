@@ -1,18 +1,29 @@
 import { buildPromptFlowHierarchy, buildWikiGroupHierarchy, classifyPromptFlowTag, DANBOORU_WIKI_GROUPS, normalizeTag, TagRecord } from '../api/tagTaxonomy';
+import { classifyTagDetailed, ClassificationResult } from '../tagging/classifier';
 
 export interface WorkerAutocompleteItem { name: string; category: string; count: number | null }
-export interface WorkerTagDetail extends TagRecord { modeParent: string; modeSub: string }
+export interface WorkerTagDetail extends TagRecord {
+  modeParent: string;
+  modeSub: string;
+  secondaryUiCategories: Array<{ parent: string; sub: string; subSub?: string }>;
+  classificationConfidence: number;
+  classificationSources: string[];
+}
 export interface Hierarchy { [parent: string]: { [sub: string]: string[] } }
 
-const CODE_MAP: Record<string,string> = { '0':'General', '1':'Artist', '3':'Copyright', '4':'Character', '5':'Meta' };
+type RichTagRecord = TagRecord & {
+  secondaryUiCategories: Array<{ parent: string; sub: string; subSub?: string }>;
+  classificationConfidence: number;
+  classificationSources: string[];
+};
 
+const CODE_MAP: Record<string,string> = { '0':'General', '1':'Artist', '3':'Copyright', '4':'Character', '5':'Meta' };
 type Mode = 'prompt_flow' | 'danbooru_types' | 'danbooru_groups';
 type Sort = 'alphabetical' | 'popularity';
-
 let mode: Mode = 'prompt_flow';
 let sort: Sort = 'alphabetical';
-let records: TagRecord[] = [];
-let lookup = new Map<string,TagRecord>();
+let records: RichTagRecord[] = [];
+let lookup = new Map<string,RichTagRecord>();
 let hierarchies: Record<Mode,Hierarchy> = { prompt_flow:{}, danbooru_types:{}, danbooru_groups:{} };
 let ready = false;
 
@@ -20,9 +31,8 @@ function csvFields(line:string): string[] {
   const out:string[]=[]; let field=''; let quoted=false;
   for(let i=0;i<line.length;i++){
     const c=line[i];
-    if(c==='"'){
-      if(quoted && line[i+1]==='"'){field+='"';i++;} else quoted=!quoted;
-    } else if(c===',' && !quoted){out.push(field);field='';} else field+=c;
+    if(c==='"'){ if(quoted && line[i+1]==='"'){field+='"';i++;} else quoted=!quoted; }
+    else if(c===',' && !quoted){out.push(field);field='';} else field+=c;
   }
   out.push(field); return out;
 }
@@ -42,21 +52,17 @@ function wikiParentMap():Map<string,string>{
 function nativeHierarchy():Hierarchy{
   const h:Hierarchy={General:{},Artist:{},Character:{},Copyright:{},Meta:{}};
   for(const r of records){
-    const p=r.nativeCategory || 'General';
-    h[p]??={};
+    const p=r.nativeCategory || 'General'; h[p]??={};
     const sub=r.wikiCategory || (p==='Meta'?'Technical & Medium':'All Tags');
     h[p][sub]??=[]; h[p][sub].push(r.tag);
   }
   return h;
 }
 
-function modeMeta(record:TagRecord):{parent:string;sub:string}{
+function modeMeta(record:RichTagRecord):{parent:string;sub:string}{
   if(mode==='prompt_flow')return{parent:record.uiCategory,sub:record.uiSubCategory};
   if(mode==='danbooru_types')return{parent:record.nativeCategory,sub:record.wikiCategory || (record.nativeCategory==='Meta'?'Technical & Medium':'All Tags')};
-  if(record.wikiCategory){
-    const parent=wikiParentMap().get(record.wikiCategory);
-    if(parent)return{parent,sub:record.wikiCategory};
-  }
+  if(record.wikiCategory){const parent=wikiParentMap().get(record.wikiCategory);if(parent)return{parent,sub:record.wikiCategory};}
   return{parent:'Native Categories',sub:record.nativeCategory};
 }
 
@@ -67,7 +73,8 @@ function buildModeHierarchy():Hierarchy{
 }
 
 function stats(){
-  const h=hierarchies[mode]||{}; const parents=['All',...Object.keys(h).filter(p=>Object.values(h[p]).some(a=>a.length))];
+  const h=hierarchies[mode]||{};
+  const parents=['All',...Object.keys(h).filter(p=>Object.values(h[p]).some(a=>a.length))];
   const parentCounts:Record<string,number>={}; const subCounts:Record<string,Record<string,number>>={};
   parentCounts.All=records.length; subCounts.All={All:records.length};
   for(const p of parents.slice(1)){
@@ -77,7 +84,6 @@ function stats(){
   }
   return{parentCategories:parents,parentCounts,subCounts,totalTags:records.length};
 }
-
 function rebuild(){hierarchies[mode]=buildModeHierarchy();return stats()}
 
 self.onmessage=async(e:MessageEvent)=>{
@@ -85,25 +91,38 @@ self.onmessage=async(e:MessageEvent)=>{
   try{
     if(type==='INIT'){
       mode=payload.mode||mode; sort=payload.sort||sort;
-      const [catRaw,descRaw,csvText]=await Promise.all([asset('/data/danbooru_categories.json','json'),asset('/data/tag_descriptions.json','json'),asset('/data/danbooru.csv','text')]);
+      const [catRaw,descRaw,csvText]=await Promise.all([
+        asset('/data/danbooru_categories.json','json'),
+        asset('/data/tag_descriptions.json','json'),
+        asset('/data/danbooru.csv','text')
+      ]);
       const wikiTags:Record<string,string>=catRaw?.tags||{};
       const descriptions:Record<string,string>=descRaw||{};
-      const next:TagRecord[]=[]; const seen=new Set<string>();
+      const next:RichTagRecord[]=[]; const seen=new Set<string>();
       if(typeof csvText==='string'){
         for(const rawLine of csvText.split(/\r?\n/)){
           if(!rawLine.trim())continue;
           const parts=csvFields(rawLine); const tag=(parts[0]||'').trim(); if(!tag)continue;
           const key=normalizeTag(tag); if(seen.has(key))continue; seen.add(key);
           const code=(parts[1]||'0').trim(); const native=CODE_MAP[code]||'General';
-          const parsed=parts[2]===undefined||parts[2].trim()===''?null:Number.parseInt(parts[2].trim(),10); const count=Number.isFinite(parsed as number)?parsed:null;
+          const parsed=parts[2]===undefined||parts[2].trim()===''?null:Number.parseInt(parts[2].trim(),10);
+          const count=Number.isFinite(parsed as number)?parsed:null;
           const wiki=wikiTags[tag] ?? wikiTags[key] ?? null;
-          const ui=classifyPromptFlowTag(tag,native,code,wiki,count);
-          next.push({tag,normalizedTag:key,postCount:count,nativeCategory:native,nativeCategoryCode:code,wikiCategory:wiki,uiCategory:ui.parent,uiSubCategory:ui.sub,uiSubSubCategory:ui.subSub||null,description:descriptions[key]||descriptions[tag]||null,isMeaningless:false});
+          const description=descriptions[key]||descriptions[tag]||null;
+          const classification:ClassificationResult=classifyTagDetailed(tag,native,code,wiki,count,description);
+          next.push({
+            tag, normalizedTag:key, postCount:count, nativeCategory:native, nativeCategoryCode:code,
+            wikiCategory:wiki, uiCategory:classification.primary.parent, uiSubCategory:classification.primary.sub,
+            uiSubSubCategory:classification.primary.subSub||null, description, isMeaningless:false,
+            secondaryUiCategories:classification.secondary,
+            classificationConfidence:classification.confidence,
+            classificationSources:classification.sources
+          });
         }
       }
       records=next; lookup=new Map(records.map(r=>[r.normalizedTag,r]));
       for(const r of records)lookup.set(r.tag.toLowerCase(),r);
-      ready=true; const data=rebuild(); self.postMessage({id,success:true,data}); return;
+      ready=true; self.postMessage({id,success:true,data:rebuild()}); return;
     }
     if(type==='SET_MODE'){mode=payload.mode as Mode;self.postMessage({id,success:true,data:rebuild()});return;}
     if(type==='SET_SORT'){sort=payload.sort as Sort;self.postMessage({id,success:true,data:true});return;}
@@ -115,7 +134,8 @@ self.onmessage=async(e:MessageEvent)=>{
       else if(mode==='danbooru_types'&&sub==='All')list=Object.values(h[parent]||{}).flat();
       else if(h[parent])list=sub==='All'?[...new Set(Object.values(h[parent]).flat())]:(h[parent][sub]||[]);
       if(q)list=list.filter(t=>normalizeTag(t).includes(q)||t.toLowerCase().replace(/_/g,' ').includes(q.replace(/_/g,' ')));
-      list=[...new Set(list)]; list.sort((a,b)=>sort==='alphabetical'?a.localeCompare(b):(lookup.get(b)?.postCount??-1)-(lookup.get(a)?.postCount??-1));
+      list=[...new Set(list)];
+      list.sort((a,b)=>sort==='alphabetical'?a.localeCompare(b):(lookup.get(b)?.postCount??-1)-(lookup.get(a)?.postCount??-1));
       self.postMessage({id,success:true,data:list.slice(0,limit)});return;
     }
     if(type==='SEARCH'){
@@ -126,14 +146,16 @@ self.onmessage=async(e:MessageEvent)=>{
     }
     if(type==='GET_DETAIL'){
       const r=lookup.get(normalizeTag(payload.tag)); if(!r){self.postMessage({id,success:true,data:null});return;}
-      const m=modeMeta(r); const detail:WorkerTagDetail={...r,modeParent:payload.currentParent||m.parent,modeSub:payload.currentSub&&payload.currentSub!=='All'?payload.currentSub:m.sub};
+      const m=modeMeta(r);
+      const detail:WorkerTagDetail={...r,modeParent:payload.currentParent||m.parent,modeSub:payload.currentSub&&payload.currentSub!=='All'?payload.currentSub:m.sub};
       self.postMessage({id,success:true,data:detail});return;
     }
     if(type==='GET_COUNT'){self.postMessage({id,success:true,data:lookup.get(normalizeTag(payload.tag))?.postCount??null});return;}
     if(type==='GET_RANDOM_TAGS'){
       const parent=payload.parent as string;const count=payload.count??2;let pool:string[]=[];const h=hierarchies[mode];
       if(parent==='All')pool=records.map(r=>r.tag);else pool=[...new Set(Object.values(h[parent]||{}).flat())];
-      const picked:string[]=[];for(let i=0;i<count&&pool.length;i++){const idx=Math.floor(Math.random()*pool.length);picked.push(pool[idx]);pool.splice(idx,1);}self.postMessage({id,success:true,data:picked});return;
+      const picked:string[]=[];for(let i=0;i<count&&pool.length;i++){const idx=Math.floor(Math.random()*pool.length);picked.push(pool[idx]);pool.splice(idx,1);}
+      self.postMessage({id,success:true,data:picked});return;
     }
   }catch(error){self.postMessage({id,success:false,error:error instanceof Error?error.message:String(error)});}
 };
