@@ -1,6 +1,6 @@
 // src/api/danbooruService.ts
-import { AutocompleteItem, TagDetail } from '../workers/danbooruWorker';
-export type { AutocompleteItem, TagDetail };
+import { AutocompleteItem, TagDetail, CategorizationMode, SortMode } from '../workers/danbooruWorker';
+export type { AutocompleteItem, TagDetail, CategorizationMode, SortMode };
 
 class DanbooruWorkerClient {
   private worker: Worker | null = null;
@@ -38,15 +38,32 @@ class DanbooruWorkerClient {
     });
   }
 
-  async init(): Promise<void> {
+  async init(mode: CategorizationMode = 'prompt_flow', sort: SortMode = 'alphabetical'): Promise<void> {
     if (this.initialized) return;
-    const res: any = await this.post('INIT');
+    const res: any = await this.post('INIT', { mode, sort });
     if (res) {
       this.parentCategories = res.parentCategories || [];
       this.parentCounts = res.parentCounts || {};
       this.subCounts = res.subCounts || {};
     }
     this.initialized = true;
+  }
+
+  async setCategorizationMode(mode: CategorizationMode): Promise<void> {
+    const res: any = await this.post('SET_MODE', { mode });
+    if (res) {
+      this.parentCategories = res.parentCategories || [];
+      this.parentCounts = res.parentCounts || {};
+      this.subCounts = res.subCounts || {};
+    }
+  }
+
+  async setSortMode(sort: SortMode): Promise<void> {
+    await this.post('SET_SORT', { sort });
+  }
+
+  async getRandomTags(parent: string, count = 2): Promise<string[]> {
+    return this.post<string[]>('GET_RANDOM_TAGS', { parent, count });
   }
 
   getParentCategories(): string[] {

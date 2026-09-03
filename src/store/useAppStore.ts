@@ -1,8 +1,7 @@
-// src/store/useAppStore.ts
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { swarmApi, ProgressPayload } from '../api/swarmClient';
-import { danbooru } from '../api/danbooruService';
+import { danbooru, CategorizationMode } from '../api/danbooruService';
 import { civitaiService } from '../api/civitaiService';
 
 export interface ModelItem {
@@ -51,6 +50,7 @@ export interface HistoryItem {
     seed: number;
     width: number;
     height: number;
+    batchCount?: number;
   };
   createdAt: string;
 }
@@ -64,6 +64,8 @@ export interface AppSettings {
   autoInjectLoraTrigger: boolean;
   defaultLoraWeight: number;
 
+  categorizationMode: CategorizationMode;
+  tagSortOrder: 'alphabetical' | 'popularity'; // <--- ADD THIS
   activePreset: 'Default' | 'Prompt Engineer' | 'Studio Canvas' | 'Multi-ControlNet';
   bottomPanelHeight: number;
   preservePromptsOnReload: boolean;
@@ -115,7 +117,7 @@ interface AppState {
   lorasList: ModelItem[];
   embeddingsList: ModelItem[];
   wildcardsList: string[];
-
+  
   steps: number;
   cfgScale: number;
   width: number;
@@ -123,6 +125,7 @@ interface AppState {
   seed: number;
   sampler: string;
   scheduler: string;
+  batchCount: number;
 
   controlNetUnits: ControlNetUnit[];
   aDetailerUnits: ADetailerUnit[];
@@ -142,10 +145,11 @@ interface AppState {
     eta: number | null;
   };
 
-  // A/B Split-Slider State
+  
+
   comparisonImage: string | null;
   isComparing: boolean;
-  compareSplit: number; // 0 to 100 percentage
+  compareSplit: number;
   setIsComparing: (b: boolean) => void;
   setComparisonImage: (url: string | null) => void;
   setCompareSplit: (n: number) => void;
@@ -158,7 +162,9 @@ interface AppState {
   settings: AppSettings;
   updateSettings: (partial: Partial<AppSettings>) => void;
   setSectionScale: (section: keyof AppSettings['sectionScales'], scale: number) => void;
-
+  setCategorizationMode: (mode: CategorizationMode) => Promise<void>;
+  globalContextMenu: { x: number; y: number; title?: string; items: any[] } | null;
+  setGlobalContextMenu: (menu: { x: number; y: number; title?: string; items: any[] } | null) => void;
   setPrompt: (p: string) => void;
   setNegativePrompt: (np: string) => void;
   setModel: (m: string) => void;
@@ -179,7 +185,7 @@ interface AppState {
   cancelGeneration: () => void;
 }
 
-let timerInterval: any = null;
+let timerInterval: ReturnType<typeof setInterval> | null = null;
 
 export const useAppStore = create<AppState>()(
   persist(
@@ -203,6 +209,7 @@ export const useAppStore = create<AppState>()(
       seed: -1,
       sampler: 'euler',
       scheduler: 'normal',
+      batchCount: 1,
 
       controlNetUnits: [
         { id: '1', enabled: false, preprocessor: 'canny', model: 'controlnet-canny-sdxl', weight: 1.0, guidanceStart: 0, guidanceEnd: 1, controlMode: 'balanced', image: null },
@@ -229,7 +236,8 @@ export const useAppStore = create<AppState>()(
         speed: null,
         eta: null
       },
-
+      globalContextMenu: null,
+      setGlobalContextMenu: (globalContextMenu) => set({ globalContextMenu }),
       comparisonImage: null,
       isComparing: false,
       compareSplit: 50,
@@ -251,11 +259,13 @@ export const useAppStore = create<AppState>()(
         autoInjectLoraTrigger: true,
         defaultLoraWeight: 1.0,
 
+        categorizationMode: 'prompt_flow', // <--- CHANGE FROM 'curated' TO 'prompt_flow'
+        tagSortOrder: 'alphabetical',
         activePreset: 'Default',
         bottomPanelHeight: 340,
         preservePromptsOnReload: true,
         randomizeSeedOnGen: true,
-        maxHistoryCount: 50,
+        maxHistoryCount: 60,
         autoSaveLayout: true,
 
         sectionScales: {
@@ -270,8 +280,7 @@ export const useAppStore = create<AppState>()(
         }
       },
 
-      updateSettings: (partial) =>
-        set((s) => ({ settings: { ...s.settings, ...partial } })),
+      updateSettings: (partial) => set((s) => ({ settings: { ...s.settings, ...partial } })),
 
       setSectionScale: (section, scale) =>
         set((s) => ({
@@ -280,6 +289,15 @@ export const useAppStore = create<AppState>()(
             sectionScales: { ...s.settings.sectionScales, [section]: scale }
           }
         })),
+
+      setCategorizationMode: async (mode) => {
+        await danbooru.setCategorizationMode(mode);
+        set((s) => ({
+          settings: { ...s.settings, categorizationMode: mode },
+          activeMacroCategory: 'All',
+          activeSubCategory: 'All'
+        }));
+      },
 
       setPrompt: (prompt) => set({ prompt }),
       setNegativePrompt: (negativePrompt) => set({ negativePrompt }),
@@ -297,7 +315,8 @@ export const useAppStore = create<AppState>()(
           cfgScale: item.params.cfgScale || get().cfgScale,
           seed: item.params.seed !== undefined ? item.params.seed : get().seed,
           width: item.params.width || get().width,
-          height: item.params.height || get().height
+          height: item.params.height || get().height,
+          batchCount: item.params.batchCount || get().batchCount
         });
       },
 
@@ -316,7 +335,7 @@ export const useAppStore = create<AppState>()(
       setPillSearchQuery: (pillSearchQuery) => set({ pillSearchQuery }),
 
       loadAssets: async () => {
-        await danbooru.init();
+        await danbooru.init(get().settings.categorizationMode || 'curated');
         const [rawModels, vaes, rawLoras, rawEmbeddings, textEncoders, wildcards] = await Promise.all([
           swarmApi.listModelsDetailed('Stable-Diffusion'),
           swarmApi.listVAEs(),
@@ -326,7 +345,6 @@ export const useAppStore = create<AppState>()(
           swarmApi.listWildcards()
         ]);
 
-        // Merge existing cached preview URLs / trigger words if available
         const mergeWithExisting = (newList: ModelItem[], existingList: ModelItem[]) => {
           const map = new Map(existingList.map((i) => [i.name, i]));
           return newList.map((item) => {
@@ -409,7 +427,6 @@ export const useAppStore = create<AppState>()(
               set({ embeddingsList: updated });
             }
           }
-          // Small throttling delay to be respectful to Civitai public API
           await new Promise((resolve) => setTimeout(resolve, 350));
         }
       },
@@ -489,7 +506,8 @@ export const useAppStore = create<AppState>()(
             height: s.height,
             seed: effectiveSeed,
             sampler: s.sampler,
-            scheduler: s.scheduler
+            scheduler: s.scheduler,
+            images: s.batchCount || 1
           },
           (progress: ProgressPayload) => {
             const now = performance.now();
@@ -516,9 +534,9 @@ export const useAppStore = create<AppState>()(
             const finalUrl = imageUrls[0] || null;
 
             if (finalUrl) {
-              const histItem: HistoryItem = {
+              const newItems: HistoryItem[] = imageUrls.map((url) => ({
                 id: crypto.randomUUID(),
-                imageUrl: finalUrl,
+                imageUrl: url,
                 prompt: s.prompt,
                 negativePrompt: s.negativePrompt,
                 params: {
@@ -529,12 +547,14 @@ export const useAppStore = create<AppState>()(
                   cfgScale: s.cfgScale,
                   seed: effectiveSeed,
                   width: s.width,
-                  height: s.height
+                  height: s.height,
+                  batchCount: s.batchCount
                 },
                 createdAt: new Date().toLocaleTimeString()
-              };
+              }));
+
               set((state) => ({
-                history: [histItem, ...state.history].slice(0, state.settings.maxHistoryCount)
+                history: [...newItems, ...state.history].slice(0, state.settings.maxHistoryCount)
               }));
             }
 
@@ -570,6 +590,7 @@ export const useAppStore = create<AppState>()(
         seed: s.seed,
         sampler: s.sampler,
         scheduler: s.scheduler,
+        batchCount: s.batchCount,
         controlNetUnits: s.controlNetUnits,
         aDetailerUnits: s.aDetailerUnits,
         activeMacroCategory: s.activeMacroCategory,

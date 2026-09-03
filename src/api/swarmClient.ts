@@ -11,6 +11,8 @@ export interface GenParams {
   seed: number;
   sampler?: string;
   scheduler?: string;
+  images?: number;
+  [key: string]: any;
 }
 
 export interface ProgressPayload {
