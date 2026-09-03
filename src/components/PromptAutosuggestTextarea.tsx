@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { danbooru, AutocompleteItem } from '../api/danbooruService';
 
 interface Props {
@@ -19,6 +20,8 @@ export const PromptAutosuggestTextarea: React.FC<Props> = ({
   const [suggestions, setSuggestions] = useState<AutocompleteItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [activeWordRange, setActiveWordRange] = useState<{ start: number; end: number } | null>(null);
+  const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -29,13 +32,26 @@ export const PromptAutosuggestTextarea: React.FC<Props> = ({
     return n.toString();
   };
 
+  // Positions dropdown directly on top of the active input in the root body
+  const updateDropdownPosition = useCallback(() => {
+    if (!textareaRef.current) return;
+    const rect = textareaRef.current.getBoundingClientRect();
+
+    setDropdownStyle({
+      position: 'fixed',
+      left: `${rect.left}px`,
+      bottom: `${window.innerHeight - rect.top + 6}px`,
+      width: `${Math.max(340, Math.min(520, rect.width))}px`,
+      zIndex: 99999
+    });
+  }, []);
+
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const text = e.target.value;
     onChange(text);
 
     const cursorPos = e.target.selectionStart || 0;
     const textBefore = text.slice(0, cursorPos);
-    // Matches word token following comma, start of line, or open parenthesis
     const match = textBefore.match(/(?:^|,|\()\s*([a-zA-Z0-9_\-]+)$/);
 
     if (match && match[1] && match[1].length >= 1) {
@@ -46,6 +62,7 @@ export const PromptAutosuggestTextarea: React.FC<Props> = ({
       const matches = danbooru.searchAutocomplete(queryWord, 8);
       setSuggestions(matches);
       setSelectedIndex(0);
+      updateDropdownPosition();
     } else {
       setSuggestions([]);
       setActiveWordRange(null);
@@ -57,6 +74,7 @@ export const PromptAutosuggestTextarea: React.FC<Props> = ({
     if (!activeWordRange || !textareaRef.current) {
       const updated = value.trim() ? `${value.trim()}, ${cleanTag}` : cleanTag;
       onChange(updated);
+      setSuggestions([]);
       return;
     }
 
@@ -99,13 +117,32 @@ export const PromptAutosuggestTextarea: React.FC<Props> = ({
 
   useEffect(() => {
     const handleClickOutside = (ev: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(ev.target as Node)) {
+      if (
+        dropdownRef.current &&
+        !dropdownRef.current.contains(ev.target as Node) &&
+        textareaRef.current &&
+        !textareaRef.current.contains(ev.target as Node)
+      ) {
         setSuggestions([]);
       }
     };
+
+    const handleWindowChange = () => {
+      if (suggestions.length > 0) {
+        updateDropdownPosition();
+      }
+    };
+
     document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+    window.addEventListener('resize', handleWindowChange);
+    window.addEventListener('scroll', handleWindowChange, true);
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('resize', handleWindowChange);
+      window.removeEventListener('scroll', handleWindowChange, true);
+    };
+  }, [suggestions.length, updateDropdownPosition]);
 
   return (
     <div className="relative flex-1 flex flex-col min-h-0">
@@ -118,41 +155,47 @@ export const PromptAutosuggestTextarea: React.FC<Props> = ({
         className={`w-full h-full bg-[#161820] border border-[#2b2f3a] rounded p-2 text-xs text-gray-200 resize-none outline-none focus:border-indigo-500 font-sans ${className}`}
       />
 
-      {suggestions.length > 0 && (
-        <div
-          ref={dropdownRef}
-          className="absolute left-2 bottom-full mb-1 w-80 max-h-56 overflow-y-auto bg-[#1a1d26] border border-[#303646] rounded shadow-2xl z-50 py-1"
-        >
-          <div className="px-2 py-1 text-[10px] text-gray-400 border-b border-[#252a35] flex justify-between font-mono">
-            <span>Danbooru Tags</span>
-            <span>Tab / Enter</span>
-          </div>
-          {suggestions.map((item, idx) => (
-            <div
-              key={item.tag}
-              onClick={() => applyTag(item.tag)}
-              onMouseEnter={() => setSelectedIndex(idx)}
-              className={`px-2.5 py-1 text-xs flex justify-between items-center cursor-pointer transition ${
-                idx === selectedIndex
-                  ? target === 'positive'
-                    ? 'bg-indigo-600 text-white'
-                    : 'bg-rose-600 text-white'
-                  : 'text-gray-300 hover:bg-[#232733]'
-              }`}
-            >
-              <span className="font-medium">{item.tag.replace(/_/g, ' ')}</span>
-              <div className="flex items-center gap-1.5 font-mono text-[10px]">
-                <span className="opacity-60">{item.category}</span>
-                {item.count && (
-                  <span className="bg-black/30 px-1 py-0.2 rounded font-semibold">
-                    {formatCount(item.count)}
-                  </span>
-                )}
-              </div>
+      {/* Renders outside any clipping containers via React Portal */}
+      {suggestions.length > 0 &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            ref={dropdownRef}
+            style={dropdownStyle}
+            className="max-h-64 overflow-y-auto bg-[#181a24] border border-[#2e3346] rounded-lg shadow-[0_20px_50px_rgba(0,0,0,0.8)] py-1 select-none backdrop-blur-md"
+          >
+            <div className="px-2.5 py-1 text-[10px] text-gray-400 border-b border-[#262a38] flex justify-between font-mono bg-[#14161f]">
+              <span>Danbooru Tags ({suggestions.length})</span>
+              <span>Tab / Enter to select</span>
             </div>
-          ))}
-        </div>
-      )}
+
+            {suggestions.map((item, idx) => (
+              <div
+                key={item.tag}
+                onClick={() => applyTag(item.tag)}
+                onMouseEnter={() => setSelectedIndex(idx)}
+                className={`px-3 py-1.5 text-xs flex justify-between items-center cursor-pointer transition ${
+                  idx === selectedIndex
+                    ? target === 'positive'
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-rose-600 text-white'
+                    : 'text-gray-300 hover:bg-[#202433]'
+                }`}
+              >
+                <span className="font-semibold truncate pr-2">{item.tag.replace(/_/g, ' ')}</span>
+                <div className="flex items-center gap-1.5 font-mono text-[10px] shrink-0">
+                  <span className="opacity-60 text-gray-400">{item.category}</span>
+                  {item.count && (
+                    <span className="bg-black/40 px-1.5 py-0.5 rounded text-indigo-300 font-medium">
+                      {formatCount(item.count)}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>,
+          document.body
+        )}
     </div>
   );
 };

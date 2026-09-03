@@ -12,7 +12,59 @@ export interface TagDetail {
   subCategory: string;
 }
 
+// Maps Danbooru subcategories into official PromptPills parent categories
+const PARENT_CATEGORY_MAP: Record<string, string[]> = {
+  'Quality': ['Metatags'],
+  'Attire & Fashion': [
+    'Attire', 'Neck And Neckwear', 'Accessories', 'Headwear', 'Eyewear',
+    'Handwear', 'Fashion Style', 'Sleeves', 'Legwear', 'Prints', 'Sexual Attire'
+  ],
+  'Face & Hair': [
+    'Face Tags', 'Eyes Tags', 'Hair Styles', 'Hair', 'Makeup', 'Ears Tags', 'Hair Color'
+  ],
+  'Body & Anatomy': [
+    'Breasts Tags', 'Body Parts', 'Hands', 'Wings', 'Shoulders', 'Feet',
+    'Ass', 'Pussy', 'Skin Color', 'Covering'
+  ],
+  'Poses & Actions': [
+    'Holding Tags', 'Verbs And Gerunds', 'Posture', 'Gestures', 'Dances', 'Sports'
+  ],
+  'Composition & Style': [
+    'Image Composition', 'Artistic License', 'Lighting', 'Colors',
+    'Visual Aesthetic', 'Focus Tags', 'Patterns'
+  ],
+  'Locations & Scenery': [
+    'Locations', 'Real World Locations', 'Backgrounds', 'Doors And Gates', 'Water', 'Fire'
+  ],
+  'Characters & People': [
+    'People', 'Character Count', 'Family Relationships', 'Gender Nonconformity', 'Transgender', 'Groups'
+  ],
+  'Animals & Nature': [
+    'Cats', 'Dogs', 'Birds', 'Flowers', 'Legendary Creatures'
+  ],
+  'Food & Beverage': [
+    'Food Tags'
+  ],
+  'Sex & Erotica': [
+    'Sex Acts', 'Sex Objects', 'Sexual Positions', 'Bdsm And Torture', 'Nudity', 'Censorship', 'Simulated Sex Acts'
+  ],
+  'Video Games': [
+    'Role-Playing Games', 'Visual Novel Games', 'Fighting Games', 'Shooter Games', 'Platform Games', 'Video Game'
+  ],
+  'Text & Lore': [
+    'Symbols', 'Text', 'Phrases', 'Japanese Dialects', 'Year Tags'
+  ],
+  'Audio & Sound': [
+    'Audio Tags'
+  ],
+  'Society & Culture': [
+    'Companies And Brand Names', 'Holidays And Celebrations', 'Jobs', 'History',
+    'Cards', 'Board Games', 'Drawing Software', 'Technology', 'Pixiv Projects', 'Fine Art Parody', 'Theme', 'Subjective'
+  ]
+};
+
 class DanbooruService {
+  // ParentCategory -> SubCategory -> Tag Array
   private hierarchy: Record<string, Record<string, string[]>> = {};
   private tagDescriptions: Record<string, string> = {};
   private tagIndex: AutocompleteItem[] = [];
@@ -24,31 +76,40 @@ class DanbooruService {
     if (this.initialized) return;
 
     try {
-      const [catRes, descRes, csvRes] = await Promise.all([
-        fetch('/data/danbooru_categories.json').catch(() => null),
-        fetch('/data/tag_descriptions.json').catch(() => null),
-        fetch('/data/danbooru.csv').catch(() => null)
+      const [catRaw, descRaw, csvText] = await Promise.all([
+        this.fetchAsset('/data/danbooru_categories.json', '/danbooru_categories.json', 'json'),
+        this.fetchAsset('/data/tag_descriptions.json', '/tag_descriptions.json', 'json'),
+        this.fetchAsset('/data/danbooru.csv', '/danbooru.csv', 'text')
       ]);
 
-      if (descRes?.ok) {
-        this.tagDescriptions = await descRes.json();
+      if (descRaw) {
+        this.tagDescriptions = descRaw;
       }
 
-      if (csvRes?.ok) {
-        const text = await csvRes.text();
-        this.parseCsv(text);
+      if (csvText) {
+        this.parseCsv(csvText);
       }
 
-      if (catRes?.ok) {
-        const raw = await catRes.json();
-        console.log('[DanbooruService] Raw categories loaded:', raw);
-        this.parseCategories(raw);
+      if (catRaw) {
+        this.parseCategories(catRaw);
       }
 
       this.initialized = true;
     } catch (err) {
       console.warn('[DanbooruService] Initialization warning:', err);
     }
+  }
+
+  private async fetchAsset(p1: string, p2: string, type: 'json' | 'text'): Promise<any> {
+    try {
+      const r = await fetch(p1);
+      if (r.ok) return type === 'json' ? await r.json() : await r.text();
+    } catch {}
+    try {
+      const r = await fetch(p2);
+      if (r.ok) return type === 'json' ? await r.json() : await r.text();
+    } catch {}
+    return null;
   }
 
   private parseCsv(csvText: string) {
@@ -74,155 +135,101 @@ class DanbooruService {
   }
 
   private parseCategories(raw: any) {
-    if (!raw) return;
+    if (!raw || !raw.tags) return;
+
+    const rawTags: Record<string, string> = raw.tags;
+    const subcatToTags: Record<string, string[]> = {};
+
+    for (const [tag, subcat] of Object.entries(rawTags)) {
+      if (!subcatToTags[subcat]) subcatToTags[subcat] = [];
+      subcatToTags[subcat].push(tag);
+    }
 
     const clean: Record<string, Record<string, string[]>> = {};
 
-    // Normalize input: unwrap root containers like { categories: [...] } or { data: [...] }
-    let items: any[] = [];
-    if (Array.isArray(raw)) {
-      items = raw;
-    } else if (Array.isArray(raw.categories)) {
-      items = raw.categories;
-    } else if (typeof raw === 'object') {
-      // If object keys are numeric indices, convert values into an array
-      const keys = Object.keys(raw);
-      const isNumericKeys = keys.length > 0 && keys.every((k) => !isNaN(Number(k)));
-      if (isNumericKeys) {
-        items = Object.values(raw);
-      } else {
-        // Object with category names as keys: { "Attire": { "Dresses": [...] } }
-        items = Object.entries(raw).map(([key, val]) => ({
-          name: key,
-          content: val
-        }));
-      }
-    }
+    for (const [parentName, subs] of Object.entries(PARENT_CATEGORY_MAP)) {
+      clean[parentName] = {};
 
-    for (const item of items) {
-      if (!item) continue;
-
-      // 1. Resolve Parent Name
-      let parentName =
-        item.name ||
-        item.category ||
-        item.title ||
-        item.label ||
-        item.category_name ||
-        item.macro;
-
-      const content = item.content || item.subcategories || item.sub_categories || item.subs || item.tags || item.items || item;
-
-      if (!parentName && typeof item === 'object') {
-        // If content itself has a name
-        parentName = Object.keys(item).find((k) => k !== 'id' && k !== 'count');
-      }
-
-      if (!parentName || parentName === 'tags' || parentName === 'categories') {
-        continue;
-      }
-
-      clean[parentName] = clean[parentName] || {};
-
-      // 2. Resolve Subcategories & Tag Arrays
-      if (Array.isArray(content)) {
-        // Flat tags under parent -> put into "All"
-        const tags = content.map((t) => (typeof t === 'string' ? t : t.name || t.tag || String(t)));
-        clean[parentName]['All'] = tags;
-        tags.forEach((t) => this.tagMetaMap.set(t.toLowerCase(), { parent: parentName, sub: 'All' }));
-      } else if (content && typeof content === 'object') {
-        for (const [subKey, subVal] of Object.entries(content)) {
-          if (subKey === 'name' || subKey === 'category' || subKey === 'id') continue;
-
-          let subName = subKey;
-          let tagList: string[] = [];
-
-          if (Array.isArray(subVal)) {
-            tagList = subVal.map((t) => (typeof t === 'string' ? t : t.name || t.tag || String(t)));
-          } else if (subVal && typeof subVal === 'object') {
-            const innerVal: any = subVal;
-            subName = innerVal.name || innerVal.title || subKey;
-            const innerTags = innerVal.tags || innerVal.items || Object.values(innerVal);
-            if (Array.isArray(innerTags)) {
-              tagList = innerTags.map((t) => (typeof t === 'string' ? t : t.name || t.tag || String(t)));
-            }
-          } else if (typeof subVal === 'string') {
-            tagList = [subVal];
-          }
-
-          if (tagList.length > 0) {
-            clean[parentName][subName] = tagList;
-            tagList.forEach((t) => this.tagMetaMap.set(t.toLowerCase(), { parent: parentName, sub: subName }));
-          }
+      for (const sub of subs) {
+        const tags = subcatToTags[sub];
+        if (tags && tags.length > 0) {
+          clean[parentName][sub] = tags;
+          tags.forEach((t: string) => {
+            this.tagMetaMap.set(t.toLowerCase().replace(/\s+/g, '_'), {
+              parent: parentName,
+              sub
+            });
+          });
         }
       }
     }
 
     this.hierarchy = clean;
-    console.log('[DanbooruService] Parsed category hierarchy:', clean);
   }
 
   getParentCategories(): string[] {
-    const keys = Object.keys(this.hierarchy).filter((k) => isNaN(Number(k)));
-    return keys.length > 0
-      ? ['All', ...keys]
-      : ['All', 'Quality', 'Attire', 'Character', 'Hair', 'Eyes', 'Environment', 'Negative'];
+    return Object.keys(this.hierarchy).filter((p) => this.getParentCount(p) > 0);
+  }
+
+  getParentCount(parent: string): number {
+    const pObj = this.hierarchy[parent];
+    if (!pObj) return 0;
+    const set = new Set<string>();
+    Object.values(pObj).forEach((arr) => arr.forEach((t: string) => set.add(t)));
+    return set.size;
   }
 
   getSubCategories(parent: string): string[] {
-    if (parent === 'All' || !this.hierarchy[parent]) return ['All'];
-    const subs = Object.keys(this.hierarchy[parent]).filter((s) => s !== 'All');
-    return ['All', ...subs];
+    const pObj = this.hierarchy[parent];
+    if (!pObj) return ['All'];
+    return ['All', ...Object.keys(pObj)];
   }
 
-  getTags(parent: string, sub: string, search = '', limit = 200): string[] {
+  getSubCount(parent: string, sub: string): number {
+    if (sub === 'All') return this.getParentCount(parent);
+    return (this.hierarchy[parent]?.[sub] || []).length;
+  }
+
+  getTags(parent: string, sub: string, search = '', limit = 300): string[] {
+    const pObj = this.hierarchy[parent];
+    if (!pObj) return [];
+
     let list: string[] = [];
 
-    if (parent === 'All') {
-      if (this.tagIndex.length > 0) {
-        list = this.tagIndex.map((i) => i.tag);
-      } else {
-        const set = new Set<string>();
-        Object.values(this.hierarchy).forEach((subMap) => {
-          Object.values(subMap).forEach((arr) => arr.forEach((t) => set.add(t)));
-        });
-        list = Array.from(set);
-      }
+    if (sub === 'All') {
+      const set = new Set<string>();
+      Object.values(pObj).forEach((arr) => arr.forEach((t: string) => set.add(t)));
+      list = Array.from(set);
     } else {
-      const parentObj = this.hierarchy[parent];
-      if (!parentObj) return [];
-
-      if (sub === 'All') {
-        const set = new Set<string>();
-        Object.values(parentObj).forEach((arr) => arr.forEach((t) => set.add(t)));
-        list = Array.from(set);
-      } else {
-        list = parentObj[sub] || [];
-      }
+      list = pObj[sub] || [];
     }
 
     if (search.trim()) {
       const q = search.trim().toLowerCase().replace(/\s+/g, '_');
-      list = list.filter((t) => {
-        const norm = t.toLowerCase();
-        return norm.includes(q) || norm.replace(/_/g, ' ').includes(q);
+      list = list.filter((t: string) => {
+        const norm = t.toLowerCase().replace(/\s+/g, '_');
+        return norm.includes(q);
       });
     }
 
     return list
-      .sort((a, b) => (this.getPostCount(b) || 0) - (this.getPostCount(a) || 0))
+      .sort((a: string, b: string) => (this.getPostCount(b) || 0) - (this.getPostCount(a) || 0))
       .slice(0, limit);
   }
 
-  getTagDetail(tag: string): TagDetail {
+  getTagDetail(tag: string, currentParent?: string, currentSub?: string): TagDetail {
     const key = tag.toLowerCase().replace(/\s+/g, '_');
-    const meta = this.tagMetaMap.get(tag.toLowerCase()) || { parent: 'General', sub: 'All' };
+    const meta = this.tagMetaMap.get(key) || {
+      parent: currentParent || 'General',
+      sub: currentSub && currentSub !== 'All' ? currentSub : 'General'
+    };
+
     return {
       tag,
-      description: this.tagDescriptions[key] || this.tagDescriptions[tag] || null,
+      description: this.tagDescriptions[key] || this.tagDescriptions[tag.toLowerCase()] || null,
       postCount: this.tagLookup.get(key)?.count ?? null,
-      parentCategory: meta.parent,
-      subCategory: meta.sub
+      parentCategory: currentParent || meta.parent,
+      subCategory: currentSub && currentSub !== 'All' ? currentSub : meta.sub
     };
   }
 
@@ -239,11 +246,6 @@ class DanbooruService {
       }
     }
     return matches;
-  }
-
-  getTagDescription(tag: string): string | null {
-    const key = tag.toLowerCase().replace(/\s+/g, '_');
-    return this.tagDescriptions[key] || this.tagDescriptions[tag] || null;
   }
 
   getPostCount(tag: string): number | null {
