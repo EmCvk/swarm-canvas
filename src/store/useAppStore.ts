@@ -11,10 +11,13 @@ export interface ModelItem {
 
 export interface HistoryItem {
   id: string;
+  batchId?: string;
   imageUrl: string;
   prompt: string;
   negativePrompt?: string;
   createdAt: string;
+  timestamp?: number;
+  isFavorite?: boolean;
   params: {
     model: string;
     steps: number;
@@ -75,6 +78,7 @@ export interface AppSettings {
     adetailer: number;
     imagesearch: number;
   };
+  hideProgressBar: boolean;
   categorizationMode: 'prompt_flow' | 'danbooru_types' | 'danbooru_groups';
   tagSortOrder: 'alphabetical' | 'popularity';
   autoInjectLoraTrigger: boolean;
@@ -87,6 +91,10 @@ export interface AppSettings {
   autoSaveLayout: boolean;
   maxHistoryCount: number;
   defaultLoraWeight?: number;
+  separateBatches: boolean;
+  autoSwapToLatest: boolean;
+  playCompletionSound: boolean;
+  completionSoundData: string | null;
 }
 
 export const SWARM_VALID_SAMPLERS = [
@@ -127,7 +135,7 @@ export interface AppState {
   activeMacroCategory: string;
   activeSubCategory: string;
   pillSearchQuery: string;
-
+  hideProgressBar: boolean;
   model: string;
   modelsList: ModelItem[];
   lorasList: ModelItem[];
@@ -172,6 +180,7 @@ export interface AppState {
   aDetailerUnits: ADetailerUnit[];
   history: HistoryItem[];
   settings: AppSettings;
+  sessionStartTime: number;
 
   setServerUrl: (url: string) => void;
   setSessionId: (id: string | null) => void;
@@ -180,6 +189,9 @@ export interface AppState {
   setActiveMacroCategory: (c: string) => void;
   setActiveSubCategory: (c: string) => void;
   setPillSearchQuery: (q: string) => void;
+
+  toggleFavorite: (id: string) => void;
+  currentQueueBatchId: string | null;
 
   setModel: (m: string) => void;
   setParams: (params: Partial<AppState>) => void;
@@ -204,6 +216,11 @@ export interface AppState {
   updateSettings: (s: Partial<AppSettings>) => void;
   setSectionScale: (section: keyof AppSettings['sectionScales'], scale: number) => void;
   setCategorizationMode: (mode: AppSettings['categorizationMode']) => void;
+  deleteHistoryItem: (id: string) => void;
+  removeFromSessionHistory: (id: string) => void;
+
+  activeContextMenu: { x: number; y: number; title: string; items: any[] } | null;
+  setActiveContextMenu: (menu: { x: number; y: number; title: string; items: any[] } | null) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -212,6 +229,8 @@ export const useAppStore = create<AppState>()(
       serverUrl: 'http://localhost:7801',
       sessionId: null,
       isConnected: false,
+      sessionStartTime: Date.now(),
+      hideProgressBar: false,
 
       prompt: 'masterpiece, best quality, 1girl, solo',
       negativePrompt: 'worst quality, low quality, bad anatomy, blurry',
@@ -293,7 +312,22 @@ export const useAppStore = create<AppState>()(
         autoSaveLayout: true,
         maxHistoryCount: 50,
         defaultLoraWeight: 1.0,
+        separateBatches: true,
+        autoSwapToLatest: true,
+        hideProgressBar: false,
+        playCompletionSound: true,
+        completionSoundData: null,
       },
+      
+      activeContextMenu: null,
+      setActiveContextMenu: (activeContextMenu) => set({ activeContextMenu }),
+
+      toggleFavorite: (id: string) =>
+        set((s) => ({
+          history: s.history.map((item) =>
+            item.id === id ? { ...item, isFavorite: !item.isFavorite } : item
+          ),
+        })),
 
       setServerUrl: (url) => set({ serverUrl: url }),
       setSessionId: (id) => set({ sessionId: id }),
@@ -305,6 +339,17 @@ export const useAppStore = create<AppState>()(
 
       setModel: (model) => set({ model }),
       setParams: (params) => set((s) => ({ ...s, ...params })),
+
+      deleteHistoryItem: (id) =>
+        set((s) => ({
+          history: s.history.filter((h) => h.id !== id),
+          activeImage: s.activeImage === s.history.find((h) => h.id === id)?.imageUrl ? null : s.activeImage,
+        })),
+
+      removeFromSessionHistory: (id) =>
+        set((s) => ({
+          history: s.history.filter((h) => h.id !== id),
+        })),
 
       loadAssets: async () => {
         try {
@@ -330,6 +375,8 @@ export const useAppStore = create<AppState>()(
       setIsComparing: (isComparing) => set({ isComparing }),
       setComparisonImage: (comparisonImage) => set({ comparisonImage }),
       setCompareSplit: (compareSplit) => set({ compareSplit }),
+
+      currentQueueBatchId: null,
 
       enqueueAndProcess: async () => {
         const state = get();
@@ -360,14 +407,18 @@ export const useAppStore = create<AppState>()(
           createdAt: Date.now(),
         };
 
-        set((s) => ({ queue: [...s.queue, newJob] }));
+        const activeBatchId = get().currentQueueBatchId || `batch-${Date.now()}`;
+        set((s) => ({
+          queue: [...s.queue, newJob],
+          currentQueueBatchId: activeBatchId,
+        }));
 
         if (state.isGenerating) return;
 
         const processQueue = async () => {
           const current = get();
           if (current.queue.length === 0) {
-            set({ isGenerating: false, activeJob: null });
+            set({ isGenerating: false, activeJob: null, currentQueueBatchId: null });
             return;
           }
 
@@ -385,7 +436,6 @@ export const useAppStore = create<AppState>()(
           const startTime = Date.now();
 
           try {
-            // Force fetch a fresh session ID from SwarmUI server every time to prevent unknown session errors
             const freshSessionId = await swarmClient.getNewSession();
             set({ sessionId: freshSessionId });
 
@@ -421,31 +471,79 @@ export const useAppStore = create<AppState>()(
             );
 
             const duration = Number(((Date.now() - startTime) / 1000).toFixed(1));
-            const newHistory: HistoryItem = {
-              id: `hist-${Date.now()}`,
-              imageUrl: res.imageUrl,
+
+            let rawImages: string[] = [];
+            if (Array.isArray((res as any)?.images) && (res as any).images.length > 0) {
+              rawImages = (res as any).images;
+            } else if ((res as any)?.image) {
+              rawImages = [(res as any).image];
+            } else if ((res as any)?.imageUrl) {
+              rawImages = [(res as any).imageUrl];
+            } else if ((res as any)?.output) {
+              rawImages = Array.isArray((res as any).output) ? (res as any).output : [(res as any).output];
+            }
+
+            const separate = get().settings.separateBatches;
+            const now = Date.now();
+            const batchId = get().currentQueueBatchId || `batch-${now}`;
+
+            const newHistoryItems: HistoryItem[] = rawImages.map((imgUrl: string, idx: number) => ({
+              id: `hist-${now}-${idx}`,
+              batchId,
+              imageUrl: imgUrl,
               prompt: nextJob.prompt,
               negativePrompt: nextJob.negativePrompt,
-              createdAt: new Date().toLocaleTimeString(),
+              createdAt: new Date(now).toLocaleTimeString(),
+              timestamp: now,
               params: {
                 model: nextJob.model,
                 steps: nextJob.steps,
                 cfgScale: nextJob.cfgScale,
-                seed: nextJob.seed,
+                seed: nextJob.seed + (separate ? idx : 0),
                 width: nextJob.width,
                 height: nextJob.height,
                 sampler: nextJob.sampler,
                 scheduler: nextJob.scheduler,
               },
-            };
+            }));
+
+            const shouldAutoSwap = get().settings.autoSwapToLatest;
 
             set((s) => ({
-              activeImage: res.imageUrl,
+              activeImage: shouldAutoSwap && newHistoryItems.length > 0 ? newHistoryItems[0].imageUrl : s.activeImage,
               livePreview: null,
               progressPercent: 100,
               metrics: { ...s.metrics, stage: 'Complete', totalTime: duration },
-              history: [newHistory, ...s.history].slice(0, s.settings.maxHistoryCount),
+              history: [...newHistoryItems, ...s.history].slice(0, s.settings.maxHistoryCount),
             }));
+
+            const currentSettings = get().settings;
+            if (currentSettings.playCompletionSound && get().queue.length === 0) {
+              try {
+                if (currentSettings.completionSoundData) {
+                  const audio = new Audio(currentSettings.completionSoundData);
+                  audio.play().catch((err) => console.warn('Audio playback failed:', err));
+                } else {
+                  const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+                  if (AudioCtx) {
+                    const ctx = new AudioCtx();
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+                    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15);
+                    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    osc.start();
+                    osc.stop(ctx.currentTime + 0.4);
+                  }
+                }
+              } catch (audioErr) {
+                console.warn('Could not play notification sound:', audioErr);
+              }
+            }
           } catch (e: any) {
             console.error('Generation failure:', e);
             set((s) => ({
@@ -464,13 +562,13 @@ export const useAppStore = create<AppState>()(
 
       cancelGeneration: () => {
         swarmClient.interrupt();
-        set({ isGenerating: false, activeJob: null, livePreview: null });
+        set({ isGenerating: false, activeJob: null, livePreview: null, currentQueueBatchId: null });
       },
 
       cancelQueuedJob: (id) =>
         set((s) => ({ queue: s.queue.filter((q) => q.id !== id) })),
 
-      clearQueue: () => set({ queue: [] }),
+      clearQueue: () => set({ queue: [], currentQueueBatchId: null }),
 
       useGenerationParams: (item) =>
         set({
@@ -528,6 +626,7 @@ export const useAppStore = create<AppState>()(
         batchCount: state.batchCount,
         settings: state.settings,
         history: state.history,
+        activeImage: state.activeImage,
       }),
     }
   )
