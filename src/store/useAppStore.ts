@@ -192,10 +192,13 @@ export interface AppState {
 
   toggleFavorite: (id: string) => void;
   currentQueueBatchId: string | null;
+  activeContextMenu: { x: number; y: number; title: string; items: any[] } | null;
+  setActiveContextMenu: (menu: { x: number; y: number; title: string; items: any[] } | null) => void;
 
   setModel: (m: string) => void;
   setParams: (params: Partial<AppState>) => void;
   loadAssets: () => Promise<void>;
+  syncServerGallery: () => Promise<void>;
   syncCivitaiMetadata: (
     category: string,
     onProgress: (current: number, total: number, name: string) => void
@@ -218,9 +221,6 @@ export interface AppState {
   setCategorizationMode: (mode: AppSettings['categorizationMode']) => void;
   deleteHistoryItem: (id: string) => void;
   removeFromSessionHistory: (id: string) => void;
-
-  activeContextMenu: { x: number; y: number; title: string; items: any[] } | null;
-  setActiveContextMenu: (menu: { x: number; y: number; title: string; items: any[] } | null) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -246,7 +246,7 @@ export const useAppStore = create<AppState>()(
       vae: 'Automatic',
       vaesList: ['Automatic', 'None'],
       textEncoder: 'Automatic',
-      textEncodersList: ['Automatic'],
+      textEncodersList: ['Automatic', 'None'],
 
       width: 832,
       height: 1216,
@@ -310,7 +310,7 @@ export const useAppStore = create<AppState>()(
         preservePromptsOnReload: true,
         randomizeSeedOnGen: true,
         autoSaveLayout: true,
-        maxHistoryCount: 50,
+        maxHistoryCount: 5000,
         defaultLoraWeight: 1.0,
         separateBatches: true,
         autoSwapToLatest: true,
@@ -318,9 +318,6 @@ export const useAppStore = create<AppState>()(
         playCompletionSound: true,
         completionSoundData: null,
       },
-      
-      activeContextMenu: null,
-      setActiveContextMenu: (activeContextMenu) => set({ activeContextMenu }),
 
       toggleFavorite: (id: string) =>
         set((s) => ({
@@ -328,6 +325,9 @@ export const useAppStore = create<AppState>()(
             item.id === id ? { ...item, isFavorite: !item.isFavorite } : item
           ),
         })),
+
+      activeContextMenu: null,
+      setActiveContextMenu: (activeContextMenu) => set({ activeContextMenu }),
 
       setServerUrl: (url) => set({ serverUrl: url }),
       setSessionId: (id) => set({ sessionId: id }),
@@ -353,35 +353,86 @@ export const useAppStore = create<AppState>()(
 
       loadAssets: async () => {
         try {
-          const [models, loras, embeddings, wildcards] = await Promise.all([
+          // 1. Force SwarmUI to rescan folders for any newly placed models/VAEs/encoders
+          await swarmClient.triggerRefresh();
+
+          // 2. Concurrently fetch all asset pools
+          const [models, loras, embeddings, wildcards, vaes, textEncoders] = await Promise.all([
             swarmClient.listModels('Stable-Diffusion'),
             swarmClient.listModels('LoRA'),
             swarmClient.listModels('Embedding'),
-            swarmClient.listModels('Wildcards'),
+            swarmClient.listWildcards(),
+            swarmClient.listVAEs(),
+            swarmClient.listTextEncoders(),
           ]);
 
-          const server = get().serverUrl.replace(/\/+$/, '');
-
-          const formatItems = (list: any[]) =>
+          const formatItems = (list: any[]): ModelItem[] =>
             list.map((m: any) => ({
-              name: typeof m === 'string' ? m : m.name,
-              previewUrl: m.preview_image
-                ? m.preview_image.startsWith('data:')
-                  ? m.preview_image
-                  : `${server}/${m.preview_image.replace(/^\/+/, '')}`
-                : undefined,
+              name: m.name,
+              previewUrl: m.previewUrl,
               description: m.description,
+              triggerWords: m.triggerWords,
             }));
 
+          const formattedModels = formatItems(models);
+          const formattedLoras = formatItems(loras);
+          const formattedEmbeddings = formatItems(embeddings);
+
           set((s) => ({
-            modelsList: formatItems(models),
-            lorasList: formatItems(loras),
-            embeddingsList: formatItems(embeddings),
-            wildcardsList: wildcards.map((w: any) => (typeof w === 'string' ? w : w.name)),
-            model: s.model || (models.length > 0 ? (typeof models[0] === 'string' ? models[0] : models[0].name) : ''),
+            modelsList: formattedModels,
+            lorasList: formattedLoras,
+            embeddingsList: formattedEmbeddings,
+            wildcardsList: wildcards.map((w) => (typeof w === 'string' ? w : (w as any).name || String(w))),
+            vaesList: vaes,
+            textEncodersList: textEncoders,
+            model: s.model || (formattedModels.length > 0 ? formattedModels[0].name : ''),
+            vae: s.vae || 'Automatic',
+            textEncoder: s.textEncoder || 'Automatic',
           }));
         } catch (err) {
-          console.error('Failed to load asset catalogs:', err);
+          console.error('[Store] Failed to load asset catalogs:', err);
+        }
+      },
+
+      syncServerGallery: async () => {
+        try {
+          const serverImgs = await swarmClient.listServerImages();
+          if (serverImgs.length === 0) return;
+
+          const currentUrls = new Set(get().history.map((h) => h.imageUrl));
+          const additions: HistoryItem[] = [];
+          const now = Date.now();
+
+          serverImgs.forEach((img, i) => {
+            if (!currentUrls.has(img.url)) {
+              additions.push({
+                id: `server-${now}-${i}`,
+                imageUrl: img.url,
+                prompt: img.name.split('/').pop()?.replace(/\.[^/.]+$/, '') || 'Server image',
+                negativePrompt: '',
+                createdAt: new Date().toLocaleTimeString(),
+                timestamp: now - i * 1000,
+                params: {
+                  model: get().model || 'Unknown',
+                  steps: 28,
+                  cfgScale: 6.5,
+                  seed: -1,
+                  width: 832,
+                  height: 1216,
+                  sampler: 'euler_ancestral',
+                  scheduler: 'normal',
+                },
+              });
+            }
+          });
+
+          if (additions.length > 0) {
+            set((s) => ({
+              history: [...s.history, ...additions].slice(0, s.settings.maxHistoryCount || 5000),
+            }));
+          }
+        } catch (err) {
+          console.error('[Store] Failed to sync server gallery:', err);
         }
       },
 
@@ -467,6 +518,8 @@ export const useAppStore = create<AppState>()(
                 prompt: nextJob.prompt,
                 negativeprompt: nextJob.negativePrompt,
                 model: nextJob.model,
+                vae: state.vae !== 'Automatic' ? state.vae : undefined,
+                textencoder: state.textEncoder !== 'Automatic' && state.textEncoder !== 'None' ? state.textEncoder : undefined,
                 width: nextJob.width,
                 height: nextJob.height,
                 steps: nextJob.steps,
@@ -493,18 +546,7 @@ export const useAppStore = create<AppState>()(
             );
 
             const duration = Number(((Date.now() - startTime) / 1000).toFixed(1));
-
-            let rawImages: string[] = [];
-            if (Array.isArray((res as any)?.images) && (res as any).images.length > 0) {
-              rawImages = (res as any).images;
-            } else if ((res as any)?.image) {
-              rawImages = [(res as any).image];
-            } else if ((res as any)?.imageUrl) {
-              rawImages = [(res as any).imageUrl];
-            } else if ((res as any)?.output) {
-              rawImages = Array.isArray((res as any).output) ? (res as any).output : [(res as any).output];
-            }
-
+            const rawImages = res.images && res.images.length > 0 ? res.images : [res.imageUrl];
             const separate = get().settings.separateBatches;
             const now = Date.now();
             const batchId = get().currentQueueBatchId || `batch-${now}`;
@@ -530,13 +572,14 @@ export const useAppStore = create<AppState>()(
             }));
 
             const shouldAutoSwap = get().settings.autoSwapToLatest;
+            const limit = Math.max(1000, get().settings?.maxHistoryCount || 5000);
 
             set((s) => ({
               activeImage: shouldAutoSwap && newHistoryItems.length > 0 ? newHistoryItems[0].imageUrl : s.activeImage,
               livePreview: null,
               progressPercent: 100,
               metrics: { ...s.metrics, stage: 'Complete', totalTime: duration },
-              history: [...newHistoryItems, ...s.history].slice(0, s.settings.maxHistoryCount),
+              history: [...newHistoryItems, ...s.history].slice(0, limit),
             }));
 
             const currentSettings = get().settings;
@@ -646,7 +689,10 @@ export const useAppStore = create<AppState>()(
         sampler: state.sampler,
         scheduler: state.scheduler,
         batchCount: state.batchCount,
-        settings: state.settings,
+        settings: {
+          ...state.settings,
+          maxHistoryCount: Math.max(1000, state.settings?.maxHistoryCount || 5000),
+        },
         history: state.history,
         activeImage: state.activeImage,
       }),

@@ -1626,6 +1626,9 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 /* =========================================================================
    3. EXTRA NETWORKS
    ========================================================================= */
+/* =========================================================================
+   3. EXTRA NETWORKS (WITH PAGINATION & WILDCARDS LOAD LIMIT)
+   ========================================================================= */
 const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
   const {
     modelsList, lorasList, embeddingsList, wildcardsList, loadAssets,
@@ -1637,10 +1640,17 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
   const [search, setSearch] = useState('');
   const [weight, setWeight] = useState(settings.defaultLoraWeight || 1.0);
 
+  // Performance limiter (prevents 2,700+ wildcards from lagging the DOM)
+  const [displayLimit, setDisplayLimit] = useState(100);
+
   const [showCivitaiModal, setShowCivitaiModal] = useState(false);
   const [selectedCivitaiCategory, setSelectedCivitaiCategory] = useState<'all' | 'models' | 'loras' | 'embeddings'>('all');
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState<{ current: number; total: number; name: string } | null>(null);
+
+  useEffect(() => {
+    setDisplayLimit(100);
+  }, [tab, search]);
 
   const getActiveList = (): ModelItem[] => {
     if (tab === 'model') return modelsList;
@@ -1649,7 +1659,16 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
     return wildcardsList.map((w) => ({ name: w, previewUrl: undefined }));
   };
 
-  const filtered = getActiveList().filter((item) => item.name.toLowerCase().includes(search.toLowerCase()));
+  const filtered = useMemo(() => {
+    const list = getActiveList();
+    if (!search.trim()) return list;
+    const q = search.toLowerCase();
+    return list.filter((item) => item.name.toLowerCase().includes(q));
+  }, [tab, modelsList, lorasList, embeddingsList, wildcardsList, search]);
+
+  const displayedItems = useMemo(() => {
+    return filtered.slice(0, displayLimit);
+  }, [filtered, displayLimit]);
 
   const handleItemClick = (item: ModelItem) => {
     if (tab === 'model') {
@@ -1755,7 +1774,7 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
         <div className="flex items-center gap-1.5">
           <button
             onClick={() => setShowCivitaiModal(true)}
-            className="px-2 py-0.5 bg-[#1f2330] hover:bg-indigo-600 hover:text-white border border-[#2d3345] text-indigo-300 rounded text-[11px] flex items-center gap-1 cursor-pointer transition shadow-sm"
+            className="px-2 py-0.5 bg-[#1f2330] hover:bg-indigo-600 hover:text-white border border-[#2d3245] text-indigo-300 rounded text-[11px] flex items-center gap-1 cursor-pointer transition shadow-sm"
             title="Search Civitai for missing previews and trigger words"
           >
             <Globe className="w-3 h-3" />
@@ -1769,13 +1788,13 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
           >
             {viewMode === 'cards' ? <List className="w-3.5 h-3.5" /> : <Grid className="w-3.5 h-3.5" />}
           </button>
-          <button onClick={() => loadAssets()} className="text-[11px] text-indigo-400 hover:underline flex items-center gap-1 cursor-pointer">
+          <button onClick={() => loadAssets()} className="text-[11px] text-indigo-400 hover:underline flex items-center gap-1 cursor-pointer" title="Reload Assets">
             <RotateCw className="w-3 h-3" />
           </button>
         </div>
       </div>
 
-      <div className="flex gap-2">
+      <div className="flex gap-2 items-center">
         <div className="relative flex-1">
           <Search className="w-3.5 h-3.5 absolute left-2 top-2 text-gray-400" />
           <input
@@ -1786,6 +1805,11 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
             className="w-full bg-[#181a20] border border-[#2b2f3a] rounded pl-7 pr-2 py-1 text-xs text-gray-200 outline-none"
           />
         </div>
+
+        <span className="text-[10px] font-mono text-gray-500 shrink-0">
+          Showing {Math.min(displayLimit, filtered.length)} of {filtered.length}
+        </span>
+
         {tab === 'lora' && (
           <div className="flex items-center gap-1 bg-[#181a20] border border-[#2b2f3a] px-2 rounded">
             <span className="text-[10px] text-gray-400">Weight:</span>
@@ -1801,7 +1825,7 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
       </div>
 
       <div className={`flex-1 overflow-y-auto pr-1 ${viewMode === 'cards' ? 'grid grid-cols-3 gap-2' : 'flex flex-col gap-1'}`}>
-        {filtered.map((item) => (
+        {displayedItems.map((item) => (
           <div
             key={item.name}
             onClick={() => handleItemClick(item)}
@@ -1845,6 +1869,26 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
             )}
           </div>
         ))}
+
+        {/* Load More Pagination for large asset libraries like Wildcards */}
+        {filtered.length > displayLimit && (
+          <div className="col-span-full py-3 flex justify-center items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setDisplayLimit((prev) => prev + 100)}
+              className="px-4 py-1.5 bg-[#1c2030] hover:bg-indigo-600 hover:text-white border border-[#2d3448] text-indigo-300 rounded font-mono text-xs cursor-pointer transition shadow-md"
+            >
+              + Load More ({displayLimit} of {filtered.length} shown)
+            </button>
+            <button
+              type="button"
+              onClick={() => setDisplayLimit(filtered.length)}
+              className="px-3 py-1.5 bg-[#181a24] hover:bg-[#25293a] border border-[#2b3042] text-gray-400 hover:text-white rounded font-mono text-xs cursor-pointer transition"
+            >
+              Show All
+            </button>
+          </div>
+        )}
       </div>
 
       {showCivitaiModal && (
@@ -2245,14 +2289,15 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 };
 
 /* =========================================================================
-   NEW GALLERY PANEL
+   NEW GALLERY PANEL (UNCAPPED CAPACITY + SERVER OUTPUT SYNC)
    ========================================================================= */
 const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
-  const { history, setParams, useGenerationParams, setComparisonImage, deleteHistoryItem, setActiveContextMenu } = useAppStore();
+  const { history, setParams, useGenerationParams, setComparisonImage, deleteHistoryItem, setActiveContextMenu, syncServerGallery } = useAppStore();
   const [viewMode, setViewMode] = useState<'cards' | 'list'>('cards');
 
   const [selectedMetaItem, setSelectedMetaItem] = useState<HistoryItem | null>(null);
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+  const [isSyncingServer, setIsSyncingServer] = useState(false);
   const toggleFavorite = useAppStore((s) => s.toggleFavorite);
 
   const filteredHistory = useMemo(() => {
@@ -2296,6 +2341,12 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
     setActiveContextMenu({ x: e.clientX, y: e.clientY, title: 'Gallery Entry', items });
   };
 
+  const handleSyncServer = async () => {
+    setIsSyncingServer(true);
+    await syncServerGallery();
+    setIsSyncingServer(false);
+  };
+
   return (
     <div className="h-full p-3 bg-[#121418] flex flex-col gap-2.5 overflow-hidden select-none text-xs">
       <div className="flex items-center justify-between border-b border-[#252a35] pb-1.5">
@@ -2303,6 +2354,15 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
           <ImageIcon className="w-3.5 h-3.5 text-purple-400" /> Full Gallery ({filteredHistory.length})
         </span>
         <div className="flex items-center gap-1.5">
+          <button
+            onClick={handleSyncServer}
+            disabled={isSyncingServer}
+            className="px-2 py-0.5 bg-[#181a24] hover:bg-indigo-600 hover:text-white border border-[#2b2f3a] text-indigo-300 rounded cursor-pointer transition flex items-center gap-1 text-[10px]"
+            title="Scan SwarmUI server Output folder for all past images"
+          >
+            <RotateCw className={`w-3 h-3 ${isSyncingServer ? 'animate-spin' : ''}`} />
+            <span>{isSyncingServer ? 'Scanning...' : 'Sync Server Output'}</span>
+          </button>
           <button
             onClick={() => setShowFavoritesOnly((prev) => !prev)}
             className={`p-1 rounded cursor-pointer border border-[#2b2f3a] transition flex items-center gap-1 text-[10px] ${
@@ -2324,7 +2384,15 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
 
       <div className={`flex-1 overflow-y-auto pr-1 items-start ${viewMode === 'cards' ? 'grid grid-cols-3 gap-2' : 'flex flex-col gap-2'}`}>
         {filteredHistory.length === 0 ? (
-          <span className="text-gray-600 m-auto">No gallery images found.</span>
+          <div className="col-span-3 text-center py-8 text-gray-500 flex flex-col items-center gap-2">
+            <span>No gallery images found.</span>
+            <button
+              onClick={handleSyncServer}
+              className="px-3 py-1 bg-indigo-600/30 hover:bg-indigo-600 text-indigo-200 rounded text-xs transition cursor-pointer"
+            >
+              Scan Server Output Folder
+            </button>
+          </div>
         ) : (
           filteredHistory.map((item, index) => {
             const finalImageUrl = resolveImageUrl(item.imageUrl);
