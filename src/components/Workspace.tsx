@@ -25,7 +25,7 @@ import {
   Grid, List, Sliders, ChevronLeft, ChevronRight,
   Settings, Copy, Trash2, ExternalLink, Download, ArrowUpRight,
   SplitSquareVertical, Globe, Check,
-  Dices, Lock, Unlock, AlertTriangle, Zap, Eye, EyeOff, Terminal, Star, Info, Volume2, Play, Sparkles, Crop, Type
+  Dices, Lock, Unlock, AlertTriangle, Zap, Eye, EyeOff, Terminal, Star, Info, Volume2, Play, Sparkles, Crop, Type, Smartphone
 } from 'lucide-react';
 
 /* =========================================================================
@@ -427,7 +427,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
         </button>
       </div>
 
-      {/* Execution Buttons Moved to Bottom Right with Space */}
+      {/* Execution Buttons at Bottom Right */}
       <div className="absolute bottom-5 right-5 flex items-center gap-1.5 p-1.5 bg-[#13151f]/90 border border-[#2d3246] rounded-xl shadow-2xl backdrop-blur-md z-30 select-none">
         {isGenerating ? (
           <button
@@ -582,7 +582,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 };
 
 /* =========================================================================
-   2. PROMPT & PROMPT-FLOW PIPELINE PANEL
+   2. PROMPT & PROMPT-FLOW PIPELINE PANEL (INTERACTIVE PILLS BY DEFAULT)
    ========================================================================= */
 const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   const {
@@ -595,22 +595,23 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   const [currentTags, setCurrentTags] = useState<string[]>([]);
   const [tagDisplayLimit, setTagDisplayLimit] = useState(300);
   const [hoverDetail, setHoverDetail] = useState<TagDetail | null>(null);
-  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number; placeAbove: boolean } | null>(null);
   const [lockedStages, setLockedStages] = useState<Record<string, boolean>>({});
 
-  // Prompt View Modes (Pills View vs Raw Textarea Mode)
+  // Prompt View Modes (Pills View is Default, Raw Textarea is Swappable)
   const [positiveViewMode, setPositiveViewMode] = useState<'pills' | 'text'>('pills');
   const [negativeViewMode, setNegativeViewMode] = useState<'pills' | 'text'>('pills');
+  const [scrollWeightEnabled, setScrollWeightEnabled] = useState(true);
 
   // Synchronized Resizable Split & Height
-  const [promptBoxHeight, setPromptBoxHeight] = useState(140);
+  const [promptBoxHeight, setPromptBoxHeight] = useState(150);
   const [positiveWidthPercent, setPositiveWidthPercent] = useState(65);
   const promptContainerRef = useRef<HTMLDivElement>(null);
 
   // Collapse / Full-Height Mode
   const [isTagBrowserCollapsed, setIsTagBrowserCollapsed] = useState(false);
 
-  // Interactive Prompt Pill State (Editing, Reordering, Disabling)
+  // Interactive Prompt Pill State
   const [editingIndex, setEditingIndex] = useState<{ target: 'positive' | 'negative'; index: number } | null>(null);
   const [editingText, setEditingText] = useState('');
   const [draggedPill, setDraggedPill] = useState<{ target: 'positive' | 'negative'; index: number } | null>(null);
@@ -631,7 +632,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
     const onMouseMove = (moveEvent: MouseEvent) => {
       const deltaY = moveEvent.clientY - startY;
-      setPromptBoxHeight(Math.max(70, Math.min(window.innerHeight - 150, startHeight + deltaY)));
+      setPromptBoxHeight(Math.max(80, Math.min(window.innerHeight - 140, startHeight + deltaY)));
     };
 
     const onMouseUp = () => {
@@ -827,7 +828,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   };
 
   /* =========================================================================
-     IN-PROMPTBOX PILL CLICK (EDIT) & DOUBLE-CLICK (DISABLE/ENABLE) LOGIC
+     IN-PROMPTBOX PILL INTERACTIVE LOGIC (LEFT CLICK EDIT, DOUBLE CLICK DISABLE)
      ========================================================================= */
   const getPromptTokens = (target: 'positive' | 'negative') => {
     const text = target === 'positive' ? prompt : negativePrompt;
@@ -844,7 +845,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     e.stopPropagation();
 
     if (pillClickTimeoutRef.current) {
-      // Double Click: Toggle disable / comment out with /* ... */
+      // Double Click: Toggle disable/mute with /* ... */
       clearTimeout(pillClickTimeoutRef.current);
       pillClickTimeoutRef.current = null;
 
@@ -877,6 +878,33 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     }
     setPromptTokens(target, tokens);
     setEditingIndex(null);
+  };
+
+  // Mouse wheel attention weight stepper: (tag:1.05)
+  const handlePillWheel = (target: 'positive' | 'negative', index: number, tokenText: string, e: React.WheelEvent) => {
+    if (!scrollWeightEnabled) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const isMuted = tokenText.startsWith('/*') && tokenText.endsWith('*/');
+    const clean = tokenText.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim();
+    const tokens = getPromptTokens(target);
+    const delta = e.deltaY < 0 ? 0.05 : -0.05;
+
+    const match = clean.match(/^\((.*):([0-9.]+)\)$/);
+    let nextWeight = 1.0;
+    let baseTag = clean;
+
+    if (match) {
+      baseTag = match[1];
+      nextWeight = Math.max(0.1, Math.min(2.0, Number((parseFloat(match[2]) + delta).toFixed(2))));
+    } else {
+      nextWeight = Math.max(0.1, Math.min(2.0, Number((1.0 + delta).toFixed(2))));
+    }
+
+    const modified = nextWeight === 1.0 ? baseTag : `(${baseTag}:${nextWeight.toFixed(2)})`;
+    tokens[index] = isMuted ? `/* ${modified} */` : modified;
+    setPromptTokens(target, tokens);
   };
 
   const handlePromptboxPillContextMenu = (target: 'positive' | 'negative', index: number, tokenText: string, e: React.MouseEvent) => {
@@ -945,11 +973,11 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
       }
     ];
 
-    setActiveContextMenu({ x: e.clientX, y: e.clientY, title: `Token: ${clean}`, items });
+    setActiveContextMenu({ x: e.clientX, y: e.clientY, title: `Pill: ${clean}`, items });
   };
 
   /* =========================================================================
-     TAG SECTION (LOWER BROWSER): CLEAN CLICKS & NON-BLOCKING POPOVER
+     TAG SECTION (LOWER BROWSER): NON-CLIPPING SAFE POPOVER & DIRECT CLICKS
      ========================================================================= */
   const handleBrowserPillClick = (tag: string, e: React.MouseEvent) => {
     if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
@@ -967,10 +995,18 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
 
     hoverTimeoutRef.current = setTimeout(async () => {
-      setTooltipPos({ x: rect.left, y: rect.bottom + 8 });
+      // Determine if popover should sit above or below to avoid slipping under screen
+      const placeAbove = rect.bottom + 180 > window.innerHeight;
+      const calculatedY = placeAbove ? Math.max(10, rect.top - 190) : rect.bottom + 8;
+
+      setTooltipPos({
+        x: Math.min(rect.left, window.innerWidth - 300),
+        y: calculatedY,
+        placeAbove
+      });
       const detail = await danbooru.getTagDetail(tag, activeMacroCategory, activeSubCategory);
       setHoverDetail(detail);
-    }, 320);
+    }, 250);
   };
 
   const handleTagMouseLeave = () => {
@@ -1023,13 +1059,14 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
   const totalCategoryCount = danbooru.getSubCount(activeMacroCategory, activeSubCategory);
 
-  // Render Promptbox Body (Interactive Pills vs Raw Textarea)
+  // Render Interactive Pills View with drag reorder, inline edit, and backspace delete
   const renderPromptBoxBody = (target: 'positive' | 'negative') => {
     const isPositive = target === 'positive';
     const viewMode = isPositive ? positiveViewMode : negativeViewMode;
     const textVal = isPositive ? prompt : negativePrompt;
     const tokens = getPromptTokens(target);
 
+    // True Raw Textarea Mode
     if (viewMode === 'text') {
       return (
         <PromptAutosuggestTextarea
@@ -1041,8 +1078,9 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
       );
     }
 
+    // Default Interactive Pills View
     return (
-      <div className="flex-1 flex flex-wrap content-start gap-1 p-1 overflow-y-auto bg-[#10121a] rounded border border-[#1e2230] select-none min-h-[60px]">
+      <div className="flex-1 flex flex-wrap content-start gap-1 p-1.5 overflow-y-auto bg-[#10121a] rounded border border-[#1e2230] select-none min-h-[60px]">
         {tokens.map((token, idx) => {
           const isMuted = token.startsWith('/*') && token.endsWith('*/');
           const isCurrentlyEditing = editingIndex?.target === target && editingIndex?.index === idx;
@@ -1062,6 +1100,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                 setDraggedPill({ target, index: idx });
               }}
               onDragEnd={() => setDraggedPill(null)}
+              onWheel={(e) => handlePillWheel(target, idx, token, e)}
               onClick={(e) => handlePromptboxPillClick(target, idx, token, e)}
               onContextMenu={(e) => handlePromptboxPillContextMenu(target, idx, token, e)}
               className={`px-2 py-0.5 rounded text-[11px] font-mono cursor-pointer transition shrink-0 flex items-center gap-1 border ${
@@ -1071,7 +1110,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                   ? 'bg-[#181d2c] border-[#29344f] text-indigo-300 hover:border-indigo-400 hover:text-white'
                   : 'bg-[#26151c] border-[#42202c] text-rose-300 hover:border-rose-400 hover:text-white'
               }`}
-              title="Left click: Edit tag • Double click: Disable/Enable tag • Drag: Reorder"
+              title="Left click: Edit • Double click: Disable/Enable • Scroll wheel: Adjust Weight"
             >
               {isCurrentlyEditing ? (
                 <input
@@ -1094,7 +1133,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
           );
         })}
 
-        {/* Quick inline adder input at the end of pills */}
+        {/* Inline Adder Input with Backspace Removal */}
         <input
           type="text"
           placeholder="+ Add tag..."
@@ -1108,9 +1147,15 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                 appendTag(tagToAdd, target, 1.0);
                 setNewTagInput({ ...newTagInput, [target]: '' });
               }
+            } else if (e.key === 'Backspace' && newTagInput[target] === '' && tokens.length > 0) {
+              // Backspace deletion on last tag
+              e.preventDefault();
+              const updated = [...tokens];
+              updated.pop();
+              setPromptTokens(target, updated);
             }
           }}
-          className="bg-transparent text-gray-300 text-[11px] font-mono px-1.5 py-0.5 rounded outline-none placeholder:text-gray-600 min-w-[75px] shrink-0"
+          className="bg-transparent text-gray-300 text-[11px] font-mono px-1.5 py-0.5 rounded outline-none placeholder:text-gray-600 min-w-[80px] shrink-0"
         />
       </div>
     );
@@ -1137,8 +1182,10 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             onClick={() => setActiveTarget('positive')}
           >
             <div className="flex justify-between items-center mb-1 shrink-0">
-              <span className={`font-mono text-[11px] font-semibold flex items-center gap-1.5 ${activeTarget === 'positive' ? 'text-indigo-400' : 'text-gray-400'}`}>
-                Positive Prompt
+              <div className="flex items-center gap-1.5">
+                <span className={`font-mono text-[11px] font-semibold ${activeTarget === 'positive' ? 'text-indigo-400' : 'text-gray-400'}`}>
+                  Positive Prompt
+                </span>
                 <button
                   type="button"
                   onClick={(e) => {
@@ -1157,14 +1204,32 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                     e.stopPropagation();
                     setPositiveViewMode(positiveViewMode === 'pills' ? 'text' : 'pills');
                   }}
-                  className="px-1.5 py-0.2 bg-[#202434] hover:bg-[#2e344d] text-gray-400 hover:text-gray-200 rounded text-[9px] font-mono border border-[#31374d] cursor-pointer transition flex items-center gap-1"
-                  title="Toggle between interactive pills and raw textarea"
+                  className="px-1.5 py-0.2 bg-[#202434] hover:bg-[#2e344d] text-gray-300 hover:text-white rounded text-[9px] font-mono border border-[#31374d] cursor-pointer transition flex items-center gap-1"
+                  title="Toggle between interactive Pills and Raw Textarea"
                 >
                   <Type className="w-2.5 h-2.5" />
                   <span>{positiveViewMode === 'pills' ? 'Raw Text' : 'Pills'}</span>
                 </button>
-              </span>
-              <span className="text-[10px] text-gray-500 font-mono">{prompt.length} chars</span>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {positiveViewMode === 'pills' && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setScrollWeightEnabled(!scrollWeightEnabled);
+                    }}
+                    className={`text-[9px] font-mono px-1 rounded border cursor-pointer ${
+                      scrollWeightEnabled ? 'text-emerald-400 border-emerald-500/30 bg-emerald-950/40' : 'text-gray-500 border-gray-700 bg-black/40'
+                    }`}
+                    title="Enable/Disable mouse wheel weight adjustments"
+                  >
+                    Scroll W: {scrollWeightEnabled ? 'ON' : 'OFF'}
+                  </button>
+                )}
+                <span className="text-[10px] text-gray-500 font-mono">{prompt.length} chars</span>
+              </div>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
               {renderPromptBoxBody('positive')}
@@ -1187,8 +1252,10 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             onClick={() => setActiveTarget('negative')}
           >
             <div className="flex justify-between items-center mb-1 shrink-0">
-              <span className={`font-mono text-[11px] font-semibold flex items-center gap-1.5 ${activeTarget === 'negative' ? 'text-rose-400' : 'text-gray-400'}`}>
-                Negative Prompt
+              <div className="flex items-center gap-1.5">
+                <span className={`font-mono text-[11px] font-semibold ${activeTarget === 'negative' ? 'text-rose-400' : 'text-gray-400'}`}>
+                  Negative Prompt
+                </span>
                 <button
                   type="button"
                   onClick={(e) => {
@@ -1207,13 +1274,14 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                     e.stopPropagation();
                     setNegativeViewMode(negativeViewMode === 'pills' ? 'text' : 'pills');
                   }}
-                  className="px-1.5 py-0.2 bg-[#202434] hover:bg-[#2e344d] text-gray-400 hover:text-gray-200 rounded text-[9px] font-mono border border-[#31374d] cursor-pointer transition flex items-center gap-1"
-                  title="Toggle between interactive pills and raw textarea"
+                  className="px-1.5 py-0.2 bg-[#202434] hover:bg-[#2e344d] text-gray-300 hover:text-white rounded text-[9px] font-mono border border-[#31374d] cursor-pointer transition flex items-center gap-1"
+                  title="Toggle between interactive Pills and Raw Textarea"
                 >
                   <Type className="w-2.5 h-2.5" />
                   <span>{negativeViewMode === 'pills' ? 'Raw Text' : 'Pills'}</span>
                 </button>
-              </span>
+              </div>
+
               <span className="text-[10px] text-gray-500 font-mono">{negativePrompt.length} chars</span>
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
@@ -1273,7 +1341,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
           </button>
         </div>
 
-        {/* Vertical Resize Separator with Prominent Grab Line */}
+        {/* Vertical Resize Separator */}
         {!isTagBrowserCollapsed && (
           <div
             onMouseDown={handleVerticalResizeStart}
@@ -1330,7 +1398,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         </div>
       )}
 
-      {/* Lower Tag Browser (Clean One-Click Insert, Passive Non-Blocking Popover) */}
+      {/* Lower Tag Browser */}
       {!isTagBrowserCollapsed && (
         <div className="flex-1 flex flex-col min-h-0 bg-[#0c0d12] mt-2">
           {/* Tier 1: Macro Categories */}
@@ -1521,13 +1589,13 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         </div>
       )}
 
-      {/* Popover Definition Card (pointer-events-none ensures it never catches or blocks clicks) */}
+      {/* Popover Definition Card: Non-Blocking Pointer Events with Smart Inversion */}
       {hoverDetail && tooltipPos && (
         <div
           className="fixed z-50 w-72 bg-[#15161d] border border-[#2c303f] rounded-lg shadow-2xl p-3 text-xs text-gray-200 pointer-events-none"
           style={{
-            left: Math.min(tooltipPos.x, window.innerWidth - 300),
-            top: Math.min(tooltipPos.y, window.innerHeight - 170)
+            left: tooltipPos.x,
+            top: tooltipPos.y
           }}
         >
           <div className="font-bold text-sm text-gray-100 mb-1">{hoverDetail.tag.replace(/_/g, ' ')}</div>
@@ -1687,7 +1755,7 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
         <div className="flex items-center gap-1.5">
           <button
             onClick={() => setShowCivitaiModal(true)}
-            className="px-2 py-0.5 bg-[#1f2330] hover:bg-indigo-600 hover:text-white border border-[#2d3245] text-indigo-300 rounded text-[11px] flex items-center gap-1 cursor-pointer transition shadow-sm"
+            className="px-2 py-0.5 bg-[#1f2330] hover:bg-indigo-600 hover:text-white border border-[#2d3345] text-indigo-300 rounded text-[11px] flex items-center gap-1 cursor-pointer transition shadow-sm"
             title="Search Civitai for missing previews and trigger words"
           >
             <Globe className="w-3 h-3" />
@@ -2743,7 +2811,10 @@ export const Workspace: React.FC = () => {
     setPrompt,
     setNegativePrompt,
     activeContextMenu,
-    setActiveContextMenu
+    setActiveContextMenu,
+    isGenerating,
+    cancelGeneration,
+    enqueueAndProcess
   } = useAppStore();
 
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({
@@ -2756,6 +2827,9 @@ export const Workspace: React.FC = () => {
 
   const [showConsole, setShowConsole] = useState(false);
   const [consoleLogs, setConsoleLogs] = useState<Array<{ time: string; type: 'log' | 'warn' | 'error'; msg: string }>>([]);
+
+  // Mobile navigation active tab
+  const [mobileActiveTab, setMobileActiveTab] = useState<'canvas' | 'prompts' | 'params' | 'history'>('canvas');
 
   useEffect(() => {
     const origLog = console.log;
@@ -2945,7 +3019,7 @@ export const Workspace: React.FC = () => {
             </button>
             <span className="font-semibold text-xs text-gray-200">SwarmCanvas</span>
 
-            <div className="flex items-center gap-1 bg-[#181b24] border border-[#2b2f3a] px-1.5 py-0.5 rounded text-[11px]">
+            <div className="hidden md:flex items-center gap-1 bg-[#181b24] border border-[#2b2f3a] px-1.5 py-0.5 rounded text-[11px]">
               <span className="text-gray-400 font-mono text-[10px]">Preset:</span>
               {(['Default', 'Prompt Engineer', 'Studio Canvas', 'Multi-ControlNet'] as const).map((pr) => (
                 <button
@@ -2961,8 +3035,8 @@ export const Workspace: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2 bg-[#181b24] border border-[#2b2f3a] px-2 py-0.5 rounded-md">
+          <div className="flex items-center gap-2 md:gap-3">
+            <div className="hidden md:flex items-center gap-2 bg-[#181b24] border border-[#2b2f3a] px-2 py-0.5 rounded-md">
               <Sliders className="w-3 h-3 text-gray-400" />
               <select
                 value={String(activeScaleSection)}
@@ -3059,18 +3133,23 @@ export const Workspace: React.FC = () => {
         </div>
       )}
 
-      {/* Main Grid */}
-      <div className="flex-1 w-full min-h-0">
-        <DockviewReact components={components} onReady={onReady} className="dockview-theme-dark h-full w-full" />
+      {/* Main Grid (Desktop Dockview vs Mobile Full View) */}
+      <div className="flex-1 w-full min-h-0 relative">
+        <div className="hidden md:block w-full h-full">
+          <DockviewReact components={components} onReady={onReady} className="dockview-theme-dark h-full w-full" />
+        </div>
+
+        {/* Mobile Fullscreen Panel Routing */}
+        <div className="md:hidden w-full h-full pb-14 overflow-hidden">
+          {mobileActiveTab === 'canvas' && <PreviewPanel api={{} as any} containerApi={{} as any} params={{}} />}
+          {mobileActiveTab === 'prompts' && <PromptPillsPanel api={{} as any} containerApi={{} as any} params={{}} />}
+          {mobileActiveTab === 'params' && <ParamsPanel api={{} as any} containerApi={{} as any} params={{}} />}
+          {mobileActiveTab === 'history' && <HistoryPanel api={{} as any} containerApi={{} as any} params={{}} />}
+        </div>
       </div>
 
-      <div
-        onMouseDown={() => (isResizingBottom.current = true)}
-        className="h-1.5 w-full bg-[#181b24] hover:bg-indigo-500 cursor-row-resize shrink-0 transition-colors z-20 border-t border-[#252a35]"
-      />
-
-      {/* Bottom Tray */}
-      <div className="relative shrink-0 flex flex-col bg-[#0f1115] border-t border-[#252a35]">
+      {/* Bottom Tray (Desktop Only) */}
+      <div className="hidden md:flex relative shrink-0 flex-col bg-[#0f1115] border-t border-[#252a35]">
         <button
           type="button"
           onClick={() => toggleSectionCollapse('bottomTray')}
@@ -3085,6 +3164,52 @@ export const Workspace: React.FC = () => {
             <PromptPillsPanel api={{} as any} containerApi={{} as any} params={{}} />
           </div>
         )}
+      </div>
+
+      {/* Mobile Bottom Navigation Bar (< 768px Phones) */}
+      <div className="md:hidden fixed bottom-0 left-0 right-0 h-14 bg-[#11131a] border-t border-[#252a38] flex items-center justify-around z-50 text-[10px] font-medium text-gray-400">
+        <button
+          type="button"
+          onClick={() => setMobileActiveTab('canvas')}
+          className={`flex flex-col items-center gap-1 ${mobileActiveTab === 'canvas' ? 'text-indigo-400' : ''}`}
+        >
+          <ImageIcon className="w-4 h-4" />
+          <span>Canvas</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setMobileActiveTab('prompts')}
+          className={`flex flex-col items-center gap-1 ${mobileActiveTab === 'prompts' ? 'text-indigo-400' : ''}`}
+        >
+          <Sparkle className="w-4 h-4" />
+          <span>Prompts</span>
+        </button>
+        {/* Quick Phone Generation Button */}
+        <button
+          type="button"
+          onClick={isGenerating ? cancelGeneration : enqueueAndProcess}
+          className={`px-3 py-2 -mt-4 rounded-full shadow-2xl flex items-center justify-center text-white ${
+            isGenerating ? 'bg-rose-600 animate-pulse' : 'bg-indigo-600'
+          }`}
+        >
+          <Wand2 className="w-5 h-5" />
+        </button>
+        <button
+          type="button"
+          onClick={() => setMobileActiveTab('params')}
+          className={`flex flex-col items-center gap-1 ${mobileActiveTab === 'params' ? 'text-indigo-400' : ''}`}
+        >
+          <Sliders className="w-4 h-4" />
+          <span>Params</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setMobileActiveTab('history')}
+          className={`flex flex-col items-center gap-1 ${mobileActiveTab === 'history' ? 'text-indigo-400' : ''}`}
+        >
+          <HistoryIcon className="w-4 h-4" />
+          <span>History</span>
+        </button>
       </div>
 
       {/* Settings Modal */}

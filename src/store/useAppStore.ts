@@ -353,14 +353,36 @@ export const useAppStore = create<AppState>()(
 
       loadAssets: async () => {
         try {
-          const models = await swarmClient.listModels();
-          if (models.length > 0) {
-            set((s) => ({
-              modelsList: models.map((m) => ({ name: m })),
-              model: s.model || models[0],
+          const [models, loras, embeddings, wildcards] = await Promise.all([
+            swarmClient.listModels('Stable-Diffusion'),
+            swarmClient.listModels('LoRA'),
+            swarmClient.listModels('Embedding'),
+            swarmClient.listModels('Wildcards'),
+          ]);
+
+          const server = get().serverUrl.replace(/\/+$/, '');
+
+          const formatItems = (list: any[]) =>
+            list.map((m: any) => ({
+              name: typeof m === 'string' ? m : m.name,
+              previewUrl: m.preview_image
+                ? m.preview_image.startsWith('data:')
+                  ? m.preview_image
+                  : `${server}/${m.preview_image.replace(/^\/+/, '')}`
+                : undefined,
+              description: m.description,
             }));
-          }
-        } catch {}
+
+          set((s) => ({
+            modelsList: formatItems(models),
+            lorasList: formatItems(loras),
+            embeddingsList: formatItems(embeddings),
+            wildcardsList: wildcards.map((w: any) => (typeof w === 'string' ? w : w.name)),
+            model: s.model || (models.length > 0 ? (typeof models[0] === 'string' ? models[0] : models[0].name) : ''),
+          }));
+        } catch (err) {
+          console.error('Failed to load asset catalogs:', err);
+        }
       },
 
       syncCivitaiMetadata: async (_cat, onProgress) => {
