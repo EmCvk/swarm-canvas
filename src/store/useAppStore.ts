@@ -99,6 +99,9 @@ export interface AppSettings {
   autoSwapToLatest: boolean;
   playCompletionSound: boolean;
   completionSoundData: string | null;
+
+  // New Before/After ADetailer Option
+  saveBeforeAfterADetailer: boolean;
 }
 
 export function stripDisabledPromptTags(rawText: string): string {
@@ -109,23 +112,6 @@ export function stripDisabledPromptTags(rawText: string): string {
     .map((t) => t.trim())
     .filter(Boolean)
     .join(', ');
-}
-
-/**
- * Builds SwarmUI's native YOLO segmentation directives
- * Syntax: <segment:yolo-modelname,,denoise>
- */
-export function buildADetailerDirectives(units: ADetailerUnit[]): string {
-  const enabledUnits = units.filter((u) => u.enabled);
-  if (enabledUnits.length === 0) return '';
-
-  return enabledUnits
-    .map((u) => {
-      const cleanModel = u.model.replace(/\.pt$/i, '');
-      const denoise = (u.denoiseStrength ?? 0.4).toFixed(2);
-      return `<segment:yolo-${cleanModel},,${denoise}>`;
-    })
-    .join(' ');
 }
 
 export const SWARM_VALID_SAMPLERS = [
@@ -179,6 +165,7 @@ export interface AppState {
   vaesList: string[];
   textEncoder: string;
   textEncodersList: string[];
+  yoloModelsList: string[];
 
   startNewBatch: () => void;
   duplicateQueuedItem: (id: string) => void;
@@ -370,6 +357,7 @@ export const useAppStore = create<AppState>()(
       vaesList: ['Automatic', 'None'],
       textEncoder: 'Automatic',
       textEncodersList: ['Automatic', 'None'],
+      yoloModelsList: ['face_yolov8n.pt', 'hand_yolov8n.pt', 'face_yolov8m.pt', 'face_yolov9c.pt', 'person_yolov8m-seg.pt'],
 
       width: 832,
       height: 1216,
@@ -439,6 +427,9 @@ export const useAppStore = create<AppState>()(
         hideProgressBar: false,
         playCompletionSound: true,
         completionSoundData: null,
+
+        // Default to false
+        saveBeforeAfterADetailer: false,
       },
 
       toggleFavorite: (id: string) =>
@@ -481,13 +472,14 @@ export const useAppStore = create<AppState>()(
         try {
           await swarmClient.triggerRefresh();
 
-          const [models, loras, embeddings, wildcards, vaes, textEncoders] = await Promise.all([
+          const [models, loras, embeddings, wildcards, vaes, textEncoders, yoloModels] = await Promise.all([
             swarmClient.listModels('Stable-Diffusion'),
             swarmClient.listModels('LoRA'),
             swarmClient.listModels('Embedding'),
             swarmClient.listWildcards(),
             swarmClient.listVAEs(),
             swarmClient.listTextEncoders(),
+            swarmClient.listYoloModels(),
           ]);
 
           const formatItems = (list: any[]): ModelItem[] =>
@@ -509,6 +501,7 @@ export const useAppStore = create<AppState>()(
             wildcardsList: wildcards.map((w) => (typeof w === 'string' ? w : (w as any).name || String(w))),
             vaesList: vaes,
             textEncodersList: textEncoders,
+            yoloModelsList: yoloModels,
             model: s.model || (formattedModels.length > 0 ? formattedModels[0].name : ''),
             vae: s.vae || 'Automatic',
             textEncoder: s.textEncoder || 'Automatic',
@@ -588,6 +581,7 @@ export const useAppStore = create<AppState>()(
         const cleanPositive = stripDisabledPromptTags(state.prompt);
         const cleanNegative = stripDisabledPromptTags(state.negativePrompt);
         const currentADetailer = state.aDetailerUnits.map((u) => ({ ...u }));
+        const selectedTextEncoder = state.textEncoder;
 
         const count = Math.max(1, state.batchCount || 1);
         const activeBatchId = get().currentQueueBatchId || `batch-${Date.now()}`;
@@ -601,7 +595,7 @@ export const useAppStore = create<AppState>()(
             negativePrompt: cleanNegative,
             model: targetModel,
             vae: state.vae,
-            textEncoder: state.textEncoder,
+            textEncoder: selectedTextEncoder,
             width: state.width,
             height: state.height,
             steps: state.steps,
@@ -636,7 +630,6 @@ export const useAppStore = create<AppState>()(
           const currentQueue = get().queue;
           const [nextJob, ...remainingQueue] = currentQueue;
 
-          // Transition job to activeJob without holding duplicate in queue
           set({
             queue: remainingQueue,
             activeJob: { ...nextJob, status: 'running' },
@@ -652,20 +645,88 @@ export const useAppStore = create<AppState>()(
             const freshSessionId = await swarmClient.getNewSession();
             set({ sessionId: freshSessionId });
 
-            // Compile SwarmUI native YOLO segmentation prompt syntax
-            const activeUnits = nextJob.aDetailerUnits || [];
-            const adetailerTag = buildADetailerDirectives(activeUnits);
-            const finalPromptWithADetailer = adetailerTag
-              ? `${nextJob.prompt} ${adetailerTag}`
+            const activeUnits = (nextJob.aDetailerUnits || []).filter((u) => u.enabled);
+            const effectiveTextEncoder = nextJob.textEncoder || get().textEncoder;
+            const shouldSaveBeforeAfter = get().settings.saveBeforeAfterADetailer && activeUnits.length > 0;
+
+            // Construct SwarmUI native prompt segment syntax for YOLO models
+            const segmentDirectives = activeUnits
+              .map((u) => {
+                const modelName = u.model.trim();
+                return `<segment:yolo-${modelName}>`;
+              })
+              .join(' ');
+            
+            const promptWithADetailer = segmentDirectives 
+              ? `${nextJob.prompt} ${segmentDirectives}` 
               : nextJob.prompt;
 
-            const res = await swarmClient.generateImage(
+            let baseImageResult: string | null = null;
+            const now = Date.now();
+            const batchId = nextJob.batchId || `batch-${now}`;
+            const newHistoryItems: HistoryItem[] = [];
+
+            // Step 1: If pre/post is enabled, fetch clean base image first without segment directives
+            if (shouldSaveBeforeAfter) {
+              set((s) => ({ metrics: { ...s.metrics, stage: 'Generating Base Pass...' } }));
+              const baseRes = await swarmClient.generateImage(
+                {
+                  session_id: freshSessionId,
+                  prompt: nextJob.prompt,
+                  negativeprompt: nextJob.negativePrompt,
+                  model: nextJob.model,
+                  vae: nextJob.vae !== 'Automatic' ? nextJob.vae : undefined,
+                  textencoder: effectiveTextEncoder !== 'Automatic' && effectiveTextEncoder !== 'None' ? effectiveTextEncoder : undefined,
+                  width: nextJob.width,
+                  height: nextJob.height,
+                  steps: nextJob.steps,
+                  cfgscale: nextJob.cfgScale,
+                  seed: nextJob.seed,
+                  sampler: nextJob.sampler,
+                  scheduler: nextJob.scheduler,
+                },
+                (p: SwarmProgressData) => {
+                  set((s) => ({
+                    currentStep: p.step || s.currentStep,
+                    maxSteps: p.max_steps || s.maxSteps,
+                    progressPercent: typeof p.percent === 'number' ? p.percent : s.progressPercent,
+                    livePreview: p.preview || s.livePreview,
+                  }));
+                }
+              );
+              baseImageResult = baseRes.imageUrl;
+
+              newHistoryItems.push({
+                id: `hist-${now}-pre`,
+                batchId,
+                imageUrl: baseImageResult,
+                prompt: `[Pre-ADetailer] ${nextJob.prompt}`,
+                negativePrompt: nextJob.negativePrompt,
+                createdAt: new Date(now - 500).toLocaleTimeString(),
+                timestamp: now - 500,
+                params: {
+                  model: nextJob.model,
+                  steps: nextJob.steps,
+                  cfgScale: nextJob.cfgScale,
+                  seed: nextJob.seed,
+                  width: nextJob.width,
+                  height: nextJob.height,
+                  sampler: nextJob.sampler,
+                  scheduler: nextJob.scheduler,
+                },
+              });
+            }
+
+            // Step 2: Generate final pass with embedded <segment:...> directives
+            set((s) => ({ metrics: { ...s.metrics, stage: activeUnits.length > 0 ? 'Running ADetailer Passes...' : 'Sampling...' } }));
+            const finalRes = await swarmClient.generateImage(
               {
                 session_id: freshSessionId,
-                prompt: finalPromptWithADetailer,
+                prompt: promptWithADetailer,
                 negativeprompt: nextJob.negativePrompt,
                 model: nextJob.model,
                 vae: nextJob.vae !== 'Automatic' ? nextJob.vae : undefined,
+                textencoder: effectiveTextEncoder !== 'Automatic' && effectiveTextEncoder !== 'None' ? effectiveTextEncoder : undefined,
                 width: nextJob.width,
                 height: nextJob.height,
                 steps: nextJob.steps,
@@ -681,26 +742,23 @@ export const useAppStore = create<AppState>()(
                   progressPercent: typeof p.percent === 'number' ? p.percent : s.progressPercent,
                   livePreview: p.preview || s.livePreview,
                   metrics: {
-                    stage: p.stage || 'Sampling',
-                    modelLoadTime: s.metrics.modelLoadTime,
+                    ...s.metrics,
+                    stage: p.stage || 'Refining',
                     speed: p.speed ?? s.metrics.speed,
                     eta: p.eta ?? s.metrics.eta,
-                    totalTime: Number(((Date.now() - startTime) / 1000).toFixed(1)),
                   },
                 }));
               }
             );
 
+            const finalImage = finalRes.imageUrl;
             const duration = Number(((Date.now() - startTime) / 1000).toFixed(1));
-            const rawImages = res.images && res.images.length > 0 ? res.images : [res.imageUrl];
-            const now = Date.now();
-            const batchId = nextJob.batchId || `batch-${now}`;
 
-            const newHistoryItems: HistoryItem[] = rawImages.map((imgUrl: string, idx: number) => ({
-              id: `hist-${now}-${idx}`,
+            newHistoryItems.push({
+              id: `hist-${now}-post`,
               batchId,
-              imageUrl: imgUrl,
-              prompt: nextJob.prompt,
+              imageUrl: finalImage,
+              prompt: shouldSaveBeforeAfter ? `[Post-ADetailer] ${nextJob.prompt}` : nextJob.prompt,
               negativePrompt: nextJob.negativePrompt,
               createdAt: new Date(now).toLocaleTimeString(),
               timestamp: now,
@@ -714,13 +772,22 @@ export const useAppStore = create<AppState>()(
                 sampler: nextJob.sampler,
                 scheduler: nextJob.scheduler,
               },
-            }));
+            });
 
             const shouldAutoSwap = get().settings.autoSwapToLatest;
             const limit = Math.max(1000, get().settings?.maxHistoryCount || 5000);
 
+            if (shouldSaveBeforeAfter && baseImageResult) {
+              set({
+                comparisonImage: baseImageResult,
+                activeImage: finalImage,
+                isComparing: true,
+                compareSplit: 50,
+              });
+            }
+
             set((s) => ({
-              activeImage: shouldAutoSwap && newHistoryItems.length > 0 ? newHistoryItems[0].imageUrl : s.activeImage,
+              activeImage: shouldAutoSwap && finalImage ? finalImage : s.activeImage,
               livePreview: null,
               progressPercent: 100,
               metrics: { ...s.metrics, stage: 'Complete', totalTime: duration },

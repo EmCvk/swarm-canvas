@@ -2811,7 +2811,7 @@ const ControlNetPanel: React.FC<IDockviewPanelProps> = () => {
 };
 
 const ADetailerPanel: React.FC<IDockviewPanelProps> = () => {
-  const { aDetailerUnits, updateADetailer, settings } = useAppStore();
+  const { aDetailerUnits, updateADetailer, settings, updateSettings, yoloModelsList } = useAppStore();
   const [activeId, setActiveId] = useState('1');
 
   const unit = aDetailerUnits.find((u) => u.id === activeId) || aDetailerUnits[0];
@@ -2821,13 +2821,14 @@ const ADetailerPanel: React.FC<IDockviewPanelProps> = () => {
       className="h-full p-3 bg-[#121418] flex flex-col gap-3 text-xs overflow-y-auto select-none"
       style={{ zoom: `${settings.sectionScales.adetailer}%` }}
     >
+      {/* Pass tabs */}
       <div className="flex gap-1 border-b border-[#252a35] pb-2">
         {aDetailerUnits.map((u) => (
           <button
             key={u.id}
             onClick={() => setActiveId(u.id)}
             className={`px-2.5 py-1 rounded text-xs flex items-center gap-1.5 cursor-pointer ${
-              activeId === u.id ? 'bg-indigo-600 text-white font-medium' : 'bg-[#181a20] text-gray-400'
+              activeId === u.id ? 'bg-indigo-600 text-white font-medium' : 'bg-[#181a20] text-gray-400 hover:text-gray-200'
             }`}
           >
             <span>Pass {u.id}</span>
@@ -2836,8 +2837,9 @@ const ADetailerPanel: React.FC<IDockviewPanelProps> = () => {
         ))}
       </div>
 
+      {/* Enable active pass */}
       <div className="flex justify-between items-center bg-[#181a20] p-2 rounded border border-[#2b2f3a]">
-        <label className="font-semibold text-gray-200 flex items-center gap-1.5">
+        <label className="font-semibold text-gray-200 flex items-center gap-1.5 cursor-pointer">
           <Sparkle className="w-3.5 h-3.5 text-amber-400" /> Enable Pass {unit.id}
         </label>
         <input
@@ -2848,19 +2850,35 @@ const ADetailerPanel: React.FC<IDockviewPanelProps> = () => {
         />
       </div>
 
+      {/* Model selector */}
       <div>
-        <label className="text-gray-400 block mb-1">Model Target</label>
+        <label className="text-gray-400 block mb-1">Model Target (API Discovered)</label>
         <select
           value={unit.model}
           onChange={(e) => updateADetailer(unit.id, { model: e.target.value })}
-          className="w-full bg-[#181a20] border border-[#2b2f3a] rounded p-1.5 text-gray-200 outline-none"
+          className="w-full bg-[#181a20] border border-[#2b2f3a] rounded p-1.5 text-gray-200 outline-none font-mono"
         >
-          <option value="face_yolov8n.pt">face_yolov8n.pt (Face Detection)</option>
-          <option value="hand_yolov8n.pt">hand_yolov8n.pt (Hand Detection)</option>
-          <option value="person_yolov8n.pt">person_yolov8n.pt (Whole Body)</option>
+          {yoloModelsList.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
         </select>
       </div>
 
+      {/* Save Before / After Comparison Feature */}
+      <div className="flex justify-between items-center bg-[#181a20]/60 p-2 rounded border border-[#252a35]">
+        <div className="flex flex-col">
+          <span className="text-gray-200 font-medium">Keep Pre-ADetailer Image</span>
+          <span className="text-[10px] text-gray-400">Saves both & auto-opens Split View slider</span>
+        </div>
+        <input
+          type="checkbox"
+          checked={settings.saveBeforeAfterADetailer}
+          onChange={(e) => updateSettings({ saveBeforeAfterADetailer: e.target.checked })}
+          className="accent-indigo-500 w-4 h-4 cursor-pointer"
+        />
+      </div>
+
+      {/* Sliders */}
       <div>
         <label className="text-gray-400 flex justify-between">
           <span>Confidence Threshold</span>

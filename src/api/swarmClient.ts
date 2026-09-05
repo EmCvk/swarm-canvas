@@ -12,6 +12,10 @@ export interface GenParams {
   sampler?: string;
   scheduler?: string;
   session_id?: string;
+
+  yolomodelinternal?: string;
+  segmentsteps?: number;
+  segmentthresholdmax?: number;
 }
 
 export interface ProgressPayload {
@@ -25,6 +29,7 @@ export interface ProgressPayload {
   speed?: number;
   eta?: number;
   stage?: string;
+  intermediateImageUrl?: string; // New field for step outputs
 }
 
 export interface ModelItemResult {
@@ -106,13 +111,6 @@ class SwarmClientClass {
         body: JSON.stringify({ session_id: session })
       });
     } catch {}
-    try {
-      await fetch('/API/RefreshModels', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: session })
-      });
-    } catch {}
   }
 
   public async getT2IParams(): Promise<any> {
@@ -154,7 +152,6 @@ class SwarmClientClass {
           if (typeof item === 'string') {
             return { name: item };
           }
-
           const rawPreview = item.preview_image || item.preview || item.image;
           let previewUrl: string | undefined = undefined;
           if (rawPreview) {
@@ -165,21 +162,11 @@ class SwarmClientClass {
               previewUrl = clean.startsWith('View/') ? `/${clean}` : `/View/${clean}`;
             }
           }
-
-          let triggerWords: string[] | undefined = undefined;
-          if (Array.isArray(item.trigger_words)) {
-            triggerWords = item.trigger_words;
-          } else if (typeof item.trigger_phrase === 'string' && item.trigger_phrase.trim()) {
-            triggerWords = item.trigger_phrase.split(',').map((s: string) => s.trim()).filter(Boolean);
-          } else if (Array.isArray(item.metadata?.trigger_words)) {
-            triggerWords = item.metadata.trigger_words;
-          }
-
           return {
             name: item.name || item.data || item.title || String(item),
             previewUrl,
             description: item.description || item.metadata?.description || undefined,
-            triggerWords
+            triggerWords: item.trigger_words || undefined
           };
         });
       }
@@ -200,7 +187,6 @@ class SwarmClientClass {
 
   public async listVAEs(): Promise<string[]> {
     const rawVaes: string[] = ['Automatic', 'None'];
-
     try {
       const models = await this.listModels('VAE');
       models.forEach((m) => {
@@ -209,78 +195,16 @@ class SwarmClientClass {
         }
       });
     } catch {}
-
-    try {
-      const t2i = await this.getT2IParams();
-      if (t2i?.list && Array.isArray(t2i.list)) {
-        const vaeParam = t2i.list.find((p: any) =>
-          (p.id || '').toLowerCase() === 'vae' || (p.name || '').toLowerCase() === 'vae'
-        );
-        if (vaeParam?.values && Array.isArray(vaeParam.values)) {
-          vaeParam.values.forEach((v: string) => {
-            if (v && v !== 'Automatic' && v !== 'None') rawVaes.push(v);
-          });
-        }
-      }
-    } catch {}
-
     return deduplicateModelList(rawVaes);
   }
 
   public async listTextEncoders(): Promise<string[]> {
     const rawEncoders: string[] = ['Automatic', 'None'];
-
-    try {
-      const t2i = await this.getT2IParams();
-      if (t2i) {
-        const topLevel = t2i.text_encoders || t2i.clips || t2i.clip_models || [];
-        if (Array.isArray(topLevel)) {
-          topLevel.forEach((item: any) => {
-            const name = typeof item === 'string' ? item : item.name || item.data;
-            if (name) rawEncoders.push(name);
-          });
-        }
-
-        if (Array.isArray(t2i.list)) {
-          for (const p of t2i.list) {
-            const id = (p.id || '').toLowerCase();
-            const name = (p.name || '').toLowerCase();
-            const isEncoder =
-              id.includes('clip') ||
-              id.includes('textencoder') ||
-              id.includes('text_encoder') ||
-              name.includes('clip') ||
-              name.includes('text encoder') ||
-              name.includes('encoder');
-
-            if (isEncoder && !id.includes('clipvision') && !id.includes('controlnet')) {
-              if (Array.isArray(p.values)) {
-                p.values.forEach((v: string) => {
-                  if (v && v !== 'Automatic' && v !== 'None') rawEncoders.push(v);
-                });
-              }
-
-              if (p.subtype && typeof p.subtype === 'string') {
-                try {
-                  const subModels = await this.listModels(p.subtype);
-                  subModels.forEach((m) => {
-                    if (m.name && m.name !== 'Automatic' && m.name !== 'None') {
-                      rawEncoders.push(m.name);
-                    }
-                  });
-                } catch {}
-              }
-            }
-          }
-        }
-      }
-    } catch {}
-
-    const directTypes = ['CLIP', 'TextEncoder', 'TextEncoders'];
-    for (const dt of directTypes) {
+    const subtypes = ['Clip', 'CLIP', 'Text-Encoder', 'TextEncoder', 'text_encoders'];
+    for (const sub of subtypes) {
       try {
-        const models = await this.listModels(dt);
-        if (models.length > 0) {
+        const models = await this.listModels(sub);
+        if (models && models.length > 0) {
           models.forEach((m) => {
             if (m.name && m.name !== 'Automatic' && m.name !== 'None') {
               rawEncoders.push(m.name);
@@ -289,8 +213,37 @@ class SwarmClientClass {
         }
       } catch {}
     }
-
+    try {
+      const t2i = await this.getT2IParams();
+      if (t2i?.list && Array.isArray(t2i.list)) {
+        for (const p of t2i.list) {
+          const id = (p.id || '').toLowerCase();
+          if (id === 'cliplmodel' || id === 'clipgmodel' || id === 'clip' || id === 'textencoder') {
+            if (Array.isArray(p.values)) {
+              p.values.forEach((v: string) => {
+                if (v && v !== 'Automatic' && v !== 'None') rawEncoders.push(v);
+              });
+            }
+          }
+        }
+      }
+    } catch {}
     return deduplicateModelList(rawEncoders);
+  }
+
+  public async listYoloModels(): Promise<string[]> {
+    try {
+      const t2i = await this.getT2IParams();
+      if (t2i?.list && Array.isArray(t2i.list)) {
+        const yoloParam = t2i.list.find((p: any) => p.id === 'yolomodelinternal');
+        if (yoloParam?.values && Array.isArray(yoloParam.values) && yoloParam.values.length > 0) {
+          return yoloParam.values;
+        }
+      }
+    } catch (e) {
+      console.warn('[SwarmClient] Could not fetch yolomodelinternal values:', e);
+    }
+    return ['face_yolov8n.pt', 'hand_yolov8n.pt', 'face_yolov8m.pt', 'face_yolov9c.pt', 'person_yolov8m-seg.pt'];
   }
 
   public async listServerImages(): Promise<Array<{ url: string; name: string }>> {
@@ -344,7 +297,6 @@ class SwarmClientClass {
       const collectedImages: string[] = [];
 
       ws.onopen = () => {
-        // Send clean params recognized by SwarmUI
         const cleanPayload: Record<string, any> = {
           session_id: params.session_id,
           prompt: params.prompt,
@@ -361,8 +313,23 @@ class SwarmClientClass {
           donotsave: false
         };
 
-        if (params.vae && params.vae !== 'Automatic') {
+        if (params.vae && params.vae !== 'Automatic' && params.vae !== 'None') {
           cleanPayload.vae = params.vae;
+        }
+
+        if (params.textencoder && params.textencoder !== 'Automatic' && params.textencoder !== 'None') {
+          cleanPayload.cliplmodel = params.textencoder;
+          cleanPayload.clipgmodel = params.textencoder;
+        }
+
+        // Native SwarmUI ADetailer / Segmentation parameters
+        if (params.yolomodelinternal) {
+          cleanPayload.segmentmodel = params.yolomodelinternal;
+          cleanPayload.yolomodelinternal = params.yolomodelinternal;
+          cleanPayload.segmentsteps = params.segmentsteps || Math.max(10, Math.round(params.steps * 0.5));
+          if (params.segmentthresholdmax !== undefined) {
+            cleanPayload.segmentthresholdmax = params.segmentthresholdmax;
+          }
         }
 
         ws.send(JSON.stringify(cleanPayload));
@@ -371,6 +338,34 @@ class SwarmClientClass {
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
+
+          // Capture intermediate step outputs emitted during multi-pass refinement
+          if (msg.image && typeof msg.image === 'string' && !msg.image.startsWith('data:') && !msg.preview) {
+            const cleanPath = msg.image.replace(/^\/?(View\/)?/, 'View/');
+            const fullUrl = `/${cleanPath}`;
+            if (!collectedImages.includes(fullUrl)) {
+              collectedImages.push(fullUrl);
+              onProgress({
+                step: msg.step || 0,
+                maxSteps: msg.max_steps || params.steps,
+                percent: 100,
+                intermediateImageUrl: fullUrl,
+                stage: msg.status || 'Intermediate Pass'
+              });
+            }
+          }
+
+          if (Array.isArray(msg.images)) {
+            msg.images.forEach((img: any) => {
+              if (typeof img === 'string' && !img.startsWith('data:')) {
+                const cleanPath = img.replace(/^\/?(View\/)?/, 'View/');
+                const fullUrl = `/${cleanPath}`;
+                if (!collectedImages.includes(fullUrl)) {
+                  collectedImages.push(fullUrl);
+                }
+              }
+            });
+          }
 
           if (msg.step !== undefined || msg.overall_percent !== undefined) {
             const step = msg.step ?? Math.round((msg.overall_percent ?? 0) * params.steps);
@@ -399,24 +394,10 @@ class SwarmClientClass {
             });
           }
 
-          if (msg.image && typeof msg.image === 'string' && !msg.image.startsWith('data:') && !msg.preview) {
-            const cleanPath = msg.image.replace(/^\/?(View\/)?/, 'View/');
-            collectedImages.push(`/${cleanPath}`);
-          }
-
-          if (Array.isArray(msg.images)) {
-            msg.images.forEach((img: any) => {
-              if (typeof img === 'string' && !img.startsWith('data:')) {
-                const cleanPath = img.replace(/^\/?(View\/)?/, 'View/');
-                collectedImages.push(`/${cleanPath}`);
-              }
-            });
-          }
-
           if (msg.complete === true || msg.status === 'complete' || msg.status === 'done') {
             if (!resolved && collectedImages.length > 0) {
               resolved = true;
-              resolve({ imageUrl: collectedImages[0], images: collectedImages });
+              resolve({ imageUrl: collectedImages[collectedImages.length - 1], images: collectedImages });
             }
           }
 
@@ -438,15 +419,13 @@ class SwarmClientClass {
         }
       };
 
-      ws.onclose = (e) => {
+      ws.onclose = () => {
         if (!resolved) {
           resolved = true;
           if (collectedImages.length > 0) {
-            resolve({ imageUrl: collectedImages[0], images: collectedImages });
-          } else if (e.code === 1000) {
-            reject(new Error('Generation ended without an output image payload.'));
+            resolve({ imageUrl: collectedImages[collectedImages.length - 1], images: collectedImages });
           } else {
-            reject(new Error(`WebSocket closed unexpectedly (code: ${e.code}).`));
+            reject(new Error('WebSocket closed without generating output images.'));
           }
         }
       };
