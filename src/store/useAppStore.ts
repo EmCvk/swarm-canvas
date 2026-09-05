@@ -11,12 +11,12 @@ export interface ModelItem {
 
 export interface HistoryItem {
   id: string;
-  batchId?: string;
+  batchId: string;
   imageUrl: string;
   prompt: string;
   negativePrompt?: string;
   createdAt: string;
-  timestamp?: number;
+  timestamp: number;
   isFavorite?: boolean;
   params: {
     model: string;
@@ -49,9 +49,12 @@ export interface ADetailerUnit {
 
 export interface QueueItem {
   id: string;
+  batchId: string;
   prompt: string;
   negativePrompt: string;
   model: string;
+  vae?: string;
+  textEncoder?: string;
   width: number;
   height: number;
   steps: number;
@@ -64,6 +67,7 @@ export interface QueueItem {
   step?: number;
   maxSteps?: number;
   createdAt: number;
+  aDetailerUnits?: ADetailerUnit[];
 }
 
 export interface AppSettings {
@@ -95,6 +99,33 @@ export interface AppSettings {
   autoSwapToLatest: boolean;
   playCompletionSound: boolean;
   completionSoundData: string | null;
+}
+
+export function stripDisabledPromptTags(rawText: string): string {
+  if (!rawText) return '';
+  return rawText
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .join(', ');
+}
+
+/**
+ * Builds SwarmUI's native YOLO segmentation directives
+ * Syntax: <segment:yolo-modelname,,denoise>
+ */
+export function buildADetailerDirectives(units: ADetailerUnit[]): string {
+  const enabledUnits = units.filter((u) => u.enabled);
+  if (enabledUnits.length === 0) return '';
+
+  return enabledUnits
+    .map((u) => {
+      const cleanModel = u.model.replace(/\.pt$/i, '');
+      const denoise = (u.denoiseStrength ?? 0.4).toFixed(2);
+      return `<segment:yolo-${cleanModel},,${denoise}>`;
+    })
+    .join(' ');
 }
 
 export const SWARM_VALID_SAMPLERS = [
@@ -130,6 +161,9 @@ export interface AppState {
   sessionId: string | null;
   isConnected: boolean;
 
+  history: HistoryItem[];
+  galleryHistory: HistoryItem[];
+
   prompt: string;
   negativePrompt: string;
   activeMacroCategory: string;
@@ -145,6 +179,15 @@ export interface AppState {
   vaesList: string[];
   textEncoder: string;
   textEncodersList: string[];
+
+  startNewBatch: () => void;
+  duplicateQueuedItem: (id: string) => void;
+  addVariationToBatch: (batchId: string) => void;
+  removeBatchFromQueue: (batchId: string) => void;
+
+  isQueuePaused: boolean;
+  setIsQueuePaused: (paused: boolean) => void;
+  reorderQueue: (startIndex: number, endIndex: number) => void;
 
   width: number;
   height: number;
@@ -178,7 +221,6 @@ export interface AppState {
 
   controlNetUnits: ControlNetUnit[];
   aDetailerUnits: ADetailerUnit[];
-  history: HistoryItem[];
   settings: AppSettings;
   sessionStartTime: number;
 
@@ -229,14 +271,95 @@ export const useAppStore = create<AppState>()(
       serverUrl: 'http://localhost:7801',
       sessionId: null,
       isConnected: false,
-      sessionStartTime: Date.now(),
+      sessionStartTime: (() => {
+        const existing = sessionStorage.getItem('swarm_session_start');
+        if (existing) return Number(existing);
+        const now = Date.now();
+        sessionStorage.setItem('swarm_session_start', String(now));
+        return now;
+      })(),
       hideProgressBar: false,
+
+      history: [],
+      galleryHistory: [],
 
       prompt: 'masterpiece, best quality, 1girl, solo',
       negativePrompt: 'worst quality, low quality, bad anatomy, blurry',
       activeMacroCategory: '1. Subject & Count',
       activeSubCategory: 'All',
       pillSearchQuery: '',
+
+      isQueuePaused: false,
+      setIsQueuePaused: (isQueuePaused) => set({ isQueuePaused }),
+
+      reorderQueue: (startIndex: number, endIndex: number) =>
+        set((s) => {
+          const list = [...s.queue];
+          const [moved] = list.splice(startIndex, 1);
+          list.splice(endIndex, 0, moved);
+          return { queue: list };
+        }),
+
+      startNewBatch: () => {
+        set({ currentQueueBatchId: `batch-${Date.now()}` });
+      },
+
+      duplicateQueuedItem: (id: string) =>
+        set((s) => {
+          const item = s.queue.find((q) => q.id === id);
+          if (!item) return {};
+          const copy: QueueItem = {
+            ...item,
+            id: `job-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            seed: item.seed === -1 ? -1 : item.seed + 1,
+            createdAt: Date.now(),
+          };
+          const idx = s.queue.findIndex((q) => q.id === id);
+          const updated = [...s.queue];
+          updated.splice(idx + 1, 0, copy);
+          return { queue: updated };
+        }),
+
+      addVariationToBatch: (batchId: string) => {
+        const state = get();
+        const targetModel = state.model || (state.modelsList[0]?.name ?? '');
+        const cleanPositive = stripDisabledPromptTags(state.prompt);
+        const cleanNegative = stripDisabledPromptTags(state.negativePrompt);
+        const currentADetailer = state.aDetailerUnits.map((u) => ({ ...u }));
+
+        const newJob: QueueItem = {
+          id: `job-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          batchId,
+          prompt: cleanPositive,
+          negativePrompt: cleanNegative,
+          model: targetModel,
+          vae: state.vae,
+          textEncoder: state.textEncoder,
+          width: state.width,
+          height: state.height,
+          steps: state.steps,
+          cfgScale: state.cfgScale,
+          seed: Math.floor(Math.random() * 2147483647),
+          sampler: state.sampler,
+          scheduler: state.scheduler,
+          status: 'queued',
+          progress: 0,
+          step: 0,
+          maxSteps: state.steps,
+          createdAt: Date.now(),
+          aDetailerUnits: currentADetailer,
+        };
+
+        set((s) => ({ queue: [...s.queue, newJob] }));
+        if (!get().isGenerating) {
+          get().enqueueAndProcess();
+        }
+      },
+
+      removeBatchFromQueue: (batchId: string) =>
+        set((s) => ({
+          queue: s.queue.filter((q) => q.batchId !== batchId),
+        })),
 
       model: '',
       modelsList: [],
@@ -287,7 +410,6 @@ export const useAppStore = create<AppState>()(
         { id: '1', enabled: false, model: 'face_yolov8n.pt', confidence: 0.3, denoiseStrength: 0.4 },
         { id: '2', enabled: false, model: 'hand_yolov8n.pt', confidence: 0.3, denoiseStrength: 0.4 },
       ],
-      history: [],
       settings: {
         activePreset: 'Default',
         bottomPanelHeight: 340,
@@ -324,6 +446,9 @@ export const useAppStore = create<AppState>()(
           history: s.history.map((item) =>
             item.id === id ? { ...item, isFavorite: !item.isFavorite } : item
           ),
+          galleryHistory: s.galleryHistory.map((item) =>
+            item.id === id ? { ...item, isFavorite: !item.isFavorite } : item
+          ),
         })),
 
       activeContextMenu: null,
@@ -343,6 +468,7 @@ export const useAppStore = create<AppState>()(
       deleteHistoryItem: (id) =>
         set((s) => ({
           history: s.history.filter((h) => h.id !== id),
+          galleryHistory: s.galleryHistory.filter((h) => h.id !== id),
           activeImage: s.activeImage === s.history.find((h) => h.id === id)?.imageUrl ? null : s.activeImage,
         })),
 
@@ -353,10 +479,8 @@ export const useAppStore = create<AppState>()(
 
       loadAssets: async () => {
         try {
-          // 1. Force SwarmUI to rescan folders for any newly placed models/VAEs/encoders
           await swarmClient.triggerRefresh();
 
-          // 2. Concurrently fetch all asset pools
           const [models, loras, embeddings, wildcards, vaes, textEncoders] = await Promise.all([
             swarmClient.listModels('Stable-Diffusion'),
             swarmClient.listModels('LoRA'),
@@ -399,7 +523,7 @@ export const useAppStore = create<AppState>()(
           const serverImgs = await swarmClient.listServerImages();
           if (serverImgs.length === 0) return;
 
-          const currentUrls = new Set(get().history.map((h) => h.imageUrl));
+          const currentUrls = new Set(get().galleryHistory.map((h) => h.imageUrl));
           const additions: HistoryItem[] = [];
           const now = Date.now();
 
@@ -407,6 +531,7 @@ export const useAppStore = create<AppState>()(
             if (!currentUrls.has(img.url)) {
               additions.push({
                 id: `server-${now}-${i}`,
+                batchId: `batch-server-${now}`,
                 imageUrl: img.url,
                 prompt: img.name.split('/').pop()?.replace(/\.[^/.]+$/, '') || 'Server image',
                 negativePrompt: '',
@@ -428,7 +553,7 @@ export const useAppStore = create<AppState>()(
 
           if (additions.length > 0) {
             set((s) => ({
-              history: [...s.history, ...additions].slice(0, s.settings.maxHistoryCount || 5000),
+              galleryHistory: [...s.galleryHistory, ...additions].slice(0, s.settings.maxHistoryCount || 5000),
             }));
           }
         } catch (err) {
@@ -460,50 +585,65 @@ export const useAppStore = create<AppState>()(
         }
 
         const effectiveSeed = state.seed === -1 ? Math.floor(Math.random() * 2147483647) : state.seed;
+        const cleanPositive = stripDisabledPromptTags(state.prompt);
+        const cleanNegative = stripDisabledPromptTags(state.negativePrompt);
+        const currentADetailer = state.aDetailerUnits.map((u) => ({ ...u }));
 
-        const newJob: QueueItem = {
-          id: `job-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          prompt: state.prompt,
-          negativePrompt: state.negativePrompt,
-          model: targetModel,
-          width: state.width,
-          height: state.height,
-          steps: state.steps,
-          cfgScale: state.cfgScale,
-          seed: effectiveSeed,
-          sampler: state.sampler,
-          scheduler: state.scheduler,
-          status: 'queued',
-          progress: 0,
-          step: 0,
-          maxSteps: state.steps,
-          createdAt: Date.now(),
-        };
-
+        const count = Math.max(1, state.batchCount || 1);
         const activeBatchId = get().currentQueueBatchId || `batch-${Date.now()}`;
+        const newJobs: QueueItem[] = [];
+
+        for (let i = 0; i < count; i++) {
+          newJobs.push({
+            id: `job-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+            batchId: activeBatchId,
+            prompt: cleanPositive,
+            negativePrompt: cleanNegative,
+            model: targetModel,
+            vae: state.vae,
+            textEncoder: state.textEncoder,
+            width: state.width,
+            height: state.height,
+            steps: state.steps,
+            cfgScale: state.cfgScale,
+            seed: state.seed === -1 ? Math.floor(Math.random() * 2147483647) : effectiveSeed + i,
+            sampler: state.sampler,
+            scheduler: state.scheduler,
+            status: 'queued',
+            progress: 0,
+            step: 0,
+            maxSteps: state.steps,
+            createdAt: Date.now() + i,
+            aDetailerUnits: currentADetailer,
+          });
+        }
+
         set((s) => ({
-          queue: [...s.queue, newJob],
+          queue: [...s.queue, ...newJobs],
           currentQueueBatchId: activeBatchId,
         }));
 
-        if (state.isGenerating) return;
+        if (get().isGenerating) return;
 
-        const processQueue = async () => {
-          const current = get();
-          if (current.queue.length === 0) {
-            set({ isGenerating: false, activeJob: null, currentQueueBatchId: null });
-            return;
+        set({ isGenerating: true });
+
+        while (get().queue.length > 0) {
+          if (get().isQueuePaused) {
+            await new Promise((r) => setTimeout(r, 400));
+            continue;
           }
 
-          const [nextJob, ...rest] = current.queue;
+          const currentQueue = get().queue;
+          const [nextJob, ...remainingQueue] = currentQueue;
+
+          // Transition job to activeJob without holding duplicate in queue
           set({
-            queue: rest,
+            queue: remainingQueue,
             activeJob: { ...nextJob, status: 'running' },
-            isGenerating: true,
             currentStep: 0,
             maxSteps: nextJob.steps,
             progressPercent: 0,
-            metrics: { ...current.metrics, stage: 'Obtaining Session...', totalTime: 0 },
+            metrics: { ...get().metrics, stage: 'Obtaining Session...', totalTime: 0 },
           });
 
           const startTime = Date.now();
@@ -512,14 +652,20 @@ export const useAppStore = create<AppState>()(
             const freshSessionId = await swarmClient.getNewSession();
             set({ sessionId: freshSessionId });
 
+            // Compile SwarmUI native YOLO segmentation prompt syntax
+            const activeUnits = nextJob.aDetailerUnits || [];
+            const adetailerTag = buildADetailerDirectives(activeUnits);
+            const finalPromptWithADetailer = adetailerTag
+              ? `${nextJob.prompt} ${adetailerTag}`
+              : nextJob.prompt;
+
             const res = await swarmClient.generateImage(
               {
                 session_id: freshSessionId,
-                prompt: nextJob.prompt,
+                prompt: finalPromptWithADetailer,
                 negativeprompt: nextJob.negativePrompt,
                 model: nextJob.model,
-                vae: state.vae !== 'Automatic' ? state.vae : undefined,
-                textencoder: state.textEncoder !== 'Automatic' && state.textEncoder !== 'None' ? state.textEncoder : undefined,
+                vae: nextJob.vae !== 'Automatic' ? nextJob.vae : undefined,
                 width: nextJob.width,
                 height: nextJob.height,
                 steps: nextJob.steps,
@@ -547,9 +693,8 @@ export const useAppStore = create<AppState>()(
 
             const duration = Number(((Date.now() - startTime) / 1000).toFixed(1));
             const rawImages = res.images && res.images.length > 0 ? res.images : [res.imageUrl];
-            const separate = get().settings.separateBatches;
             const now = Date.now();
-            const batchId = get().currentQueueBatchId || `batch-${now}`;
+            const batchId = nextJob.batchId || `batch-${now}`;
 
             const newHistoryItems: HistoryItem[] = rawImages.map((imgUrl: string, idx: number) => ({
               id: `hist-${now}-${idx}`,
@@ -563,7 +708,7 @@ export const useAppStore = create<AppState>()(
                 model: nextJob.model,
                 steps: nextJob.steps,
                 cfgScale: nextJob.cfgScale,
-                seed: nextJob.seed + (separate ? idx : 0),
+                seed: nextJob.seed,
                 width: nextJob.width,
                 height: nextJob.height,
                 sampler: nextJob.sampler,
@@ -580,49 +725,51 @@ export const useAppStore = create<AppState>()(
               progressPercent: 100,
               metrics: { ...s.metrics, stage: 'Complete', totalTime: duration },
               history: [...newHistoryItems, ...s.history].slice(0, limit),
+              galleryHistory: [...newHistoryItems, ...s.galleryHistory].slice(0, limit),
             }));
 
-            const currentSettings = get().settings;
-            if (currentSettings.playCompletionSound && get().queue.length === 0) {
-              try {
-                if (currentSettings.completionSoundData) {
-                  const audio = new Audio(currentSettings.completionSoundData);
-                  audio.play().catch((err) => console.warn('Audio playback failed:', err));
-                } else {
-                  const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-                  if (AudioCtx) {
-                    const ctx = new AudioCtx();
-                    const osc = ctx.createOscillator();
-                    const gain = ctx.createGain();
-                    osc.type = 'sine';
-                    osc.frequency.setValueAtTime(587.33, ctx.currentTime);
-                    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15);
-                    gain.gain.setValueAtTime(0.15, ctx.currentTime);
-                    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
-                    osc.connect(gain);
-                    gain.connect(ctx.destination);
-                    osc.start();
-                    osc.stop(ctx.currentTime + 0.4);
-                  }
-                }
-              } catch (audioErr) {
-                console.warn('Could not play notification sound:', audioErr);
-              }
-            }
           } catch (e: any) {
-            console.error('Generation failure:', e);
+            console.error('Queue job failure:', e);
             set((s) => ({
               metrics: {
                 ...s.metrics,
-                stage: `Error: ${e?.message || 'Server connection failed'}`,
+                stage: `Error: ${e?.message || 'Generation aborted'}`,
               },
             }));
-          } finally {
-            processQueue();
           }
-        };
+        }
 
-        processQueue();
+        set({
+          isGenerating: false,
+          activeJob: null,
+          currentQueueBatchId: null,
+          livePreview: null,
+        });
+
+        const currentSettings = get().settings;
+        if (currentSettings.playCompletionSound) {
+          try {
+            if (currentSettings.completionSoundData) {
+              new Audio(currentSettings.completionSoundData).play().catch(() => {});
+            } else {
+              const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+              if (AudioCtx) {
+                const ctx = new AudioCtx();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15);
+                gain.gain.setValueAtTime(0.15, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start();
+                osc.stop(ctx.currentTime + 0.4);
+              }
+            }
+          } catch {}
+        }
       },
 
       cancelGeneration: () => {
@@ -693,7 +840,7 @@ export const useAppStore = create<AppState>()(
           ...state.settings,
           maxHistoryCount: Math.max(1000, state.settings?.maxHistoryCount || 5000),
         },
-        history: state.history,
+        galleryHistory: state.galleryHistory,
         activeImage: state.activeImage,
       }),
     }

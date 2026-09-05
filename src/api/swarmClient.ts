@@ -69,10 +69,6 @@ export async function getSession(forceNew = false): Promise<string> {
   return sessionPromise;
 }
 
-/**
- * Path-aware deduplication that keeps directory structure intact
- * (prevents qwen/vae from colliding with standard vae)
- */
 export function deduplicateModelList(items: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -101,9 +97,6 @@ class SwarmClientClass {
     return getSession(true);
   }
 
-  /**
-   * Forces SwarmUI to re-scan all disk folders for newly added models/VAEs/encoders
-   */
   public async triggerRefresh(): Promise<void> {
     const session = await getSession();
     try {
@@ -205,9 +198,6 @@ class SwarmClientClass {
     return models.map((w) => w.name);
   }
 
-  /**
-   * Discovers all VAE files and deduplicates without collapsing subdirectories
-   */
   public async listVAEs(): Promise<string[]> {
     const rawVaes: string[] = ['Automatic', 'None'];
 
@@ -237,13 +227,9 @@ class SwarmClientClass {
     return deduplicateModelList(rawVaes);
   }
 
-  /**
-   * Resolves Text Encoders and CLIP models (qwen_3_06b_base, etc.)
-   */
   public async listTextEncoders(): Promise<string[]> {
     const rawEncoders: string[] = ['Automatic', 'None'];
 
-    // 1. Scan /API/ListT2IParams parameter tables where CLIP / encoders are mapped
     try {
       const t2i = await this.getT2IParams();
       if (t2i) {
@@ -274,7 +260,6 @@ class SwarmClientClass {
                 });
               }
 
-              // If parameter points to a specific subtype model pool
               if (p.subtype && typeof p.subtype === 'string') {
                 try {
                   const subModels = await this.listModels(p.subtype);
@@ -291,7 +276,6 @@ class SwarmClientClass {
       }
     } catch {}
 
-    // 2. Direct query on SwarmUI model handlers
     const directTypes = ['CLIP', 'TextEncoder', 'TextEncoders'];
     for (const dt of directTypes) {
       try {
@@ -360,13 +344,28 @@ class SwarmClientClass {
       const collectedImages: string[] = [];
 
       ws.onopen = () => {
-        ws.send(
-          JSON.stringify({
-            ...params,
-            images: 1,
-            donotsave: false
-          })
-        );
+        // Send clean params recognized by SwarmUI
+        const cleanPayload: Record<string, any> = {
+          session_id: params.session_id,
+          prompt: params.prompt,
+          negativeprompt: params.negativeprompt || '',
+          model: params.model,
+          width: params.width,
+          height: params.height,
+          steps: params.steps,
+          cfgscale: params.cfgscale,
+          seed: params.seed,
+          sampler: params.sampler,
+          scheduler: params.scheduler,
+          images: 1,
+          donotsave: false
+        };
+
+        if (params.vae && params.vae !== 'Automatic') {
+          cleanPayload.vae = params.vae;
+        }
+
+        ws.send(JSON.stringify(cleanPayload));
       };
 
       ws.onmessage = (event) => {

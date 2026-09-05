@@ -1,3 +1,12 @@
+import { VisualSceneStager } from './companions/VisualSceneStager';
+import { LatentSynthesizer } from './companions/LatentSynthesizer';
+import { CharacterDossier } from './companions/CharacterDossier';
+import { ArtDirectorCopilot } from './companions/ArtDirectorCopilot';
+import { PromptMorphScheduler } from './companions/PromptMorphScheduler';
+import { TagSynergyEngine } from './companions/TagSynergyEngine';
+import { WildcardSlotMachine } from './companions/WildcardSlotMachine';
+import { TagRarityInspector } from './companions/TagRarityInspector';
+
 import React, { useEffect, useState, useRef, useMemo } from 'react';
 import {
   DockviewReact,
@@ -25,7 +34,9 @@ import {
   Grid, List, Sliders, ChevronLeft, ChevronRight,
   Settings, Copy, Trash2, ExternalLink, Download, ArrowUpRight,
   SplitSquareVertical, Globe, Check,
-  Dices, Lock, Unlock, AlertTriangle, Zap, Eye, EyeOff, Terminal, Star, Info, Volume2, Play, Sparkles, Crop, Type, Smartphone
+  Dices, Lock, Unlock, AlertTriangle, Zap, Eye, EyeOff, Terminal,
+  Star, Info, Volume2, Play, Sparkles, Crop, Type, Smartphone, Move,
+  BookOpen, BarChart3, Pause,
 } from 'lucide-react';
 
 /* =========================================================================
@@ -128,7 +139,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
   const queue: any[] = store.queue || [];
   const activeJob: any = store.activeJob || null;
   const displayImage = livePreview || activeImage;
-
+  const [isQueueExpanded, setIsQueueExpanded] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
@@ -270,6 +281,30 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
   };
 
   const totalInQueue = queue.length + (isGenerating || activeJob ? 1 : 0);
+
+  // Group queue tasks into unified batches including the running job
+  const combinedBatchGroups = useMemo(() => {
+    const allJobs: any[] = [];
+    if (activeJob) {
+      allJobs.push({ ...activeJob, isRunning: true });
+    }
+    queue.forEach((q: any) => allJobs.push({ ...q, isRunning: false }));
+
+    const groups: { batchId: string; items: any[] }[] = [];
+    const map = new Map<string, any[]>();
+
+    allJobs.forEach((job) => {
+      const bId = job.batchId || 'batch-unassigned';
+      if (!map.has(bId)) {
+        const list: any[] = [];
+        map.set(bId, list);
+        groups.push({ batchId: bId, items: list });
+      }
+      map.get(bId)!.push(job);
+    });
+
+    return groups;
+  }, [activeJob, queue]);
 
   return (
     <div
@@ -450,7 +485,7 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 
         <button
           type="button"
-          onClick={() => useAppStore.getState().enqueueAndProcess()}
+          onClick={enqueueAndProcess}
           className="px-3 py-1.5 bg-[#1e2230] hover:bg-[#282d3e] border border-[#343a4e] font-mono text-[11px] text-amber-300 hover:text-amber-200 rounded-lg cursor-pointer transition flex items-center gap-1"
           title="Add current prompt to queue"
         >
@@ -459,81 +494,261 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
         </button>
       </div>
 
-      {/* Floating Viewport Queue Manager Modal */}
+      {/* Floating Viewport Queue Manager with Batch Controls */}
       {isQueueOpen && (
-        <div className="absolute top-12 right-3 w-72 max-h-80 bg-[#12141c]/95 border border-[#2b2f3a] rounded-xl shadow-2xl backdrop-blur-md flex flex-col z-30 overflow-hidden text-xs">
-          <div className="flex items-center justify-between px-3 py-2 border-b border-[#252a35] bg-[#161822]">
-            <div className="flex items-center gap-1.5 font-semibold text-gray-200">
-              <Layers className="w-3.5 h-3.5 text-amber-400" />
-              <span>Viewport Queue</span>
-              <span className="px-1.5 py-0.2 bg-amber-500/20 text-amber-300 text-[10px] font-mono rounded-full">
+        <div
+          className={`absolute top-12 right-3 ${
+            isQueueExpanded ? 'w-[560px] max-h-[620px]' : 'w-88 max-h-[460px]'
+          } bg-[#12141c]/95 border border-[#2d3346] rounded-xl shadow-2xl backdrop-blur-md flex flex-col z-30 overflow-hidden text-xs transition-all duration-150`}
+        >
+          <div className="flex items-center justify-between px-3 py-2 border-b border-[#252a38] bg-[#161824]">
+            <div className="flex items-center gap-2">
+              <Layers className="w-4 h-4 text-amber-400" />
+              <span className="font-semibold text-gray-200">Queue & Batch Hub</span>
+              <span className="px-1.5 py-0.2 bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[10px] font-mono rounded-full">
                 {totalInQueue}
               </span>
             </div>
-            <div className="flex items-center gap-1">
-              {queue.length > 0 && store.clearQueue && (
+
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => store.startNewBatch?.()}
+                className="px-2 py-0.5 rounded bg-indigo-950/40 hover:bg-indigo-600 border border-indigo-500/40 text-indigo-300 hover:text-white font-mono text-[10px] cursor-pointer transition flex items-center gap-1 shadow-xs"
+                title="Force upcoming additions into a brand new history batch card"
+              >
+                <Plus className="w-2.5 h-2.5" />
+                <span>New Batch</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => store.setIsQueuePaused?.(!store.isQueuePaused)}
+                className={`px-1.5 py-0.5 rounded text-[10px] font-mono flex items-center gap-1 border transition cursor-pointer ${
+                  store.isQueuePaused
+                    ? 'bg-amber-900/50 border-amber-600 text-amber-200'
+                    : 'bg-[#1e2230] border-[#2e354a] text-gray-400 hover:text-white'
+                }`}
+                title={store.isQueuePaused ? 'Resume execution' : 'Pause queue after current task'}
+              >
+                {store.isQueuePaused ? <Play className="w-2.5 h-2.5" /> : <Pause className="w-2.5 h-2.5" />}
+                <span>{store.isQueuePaused ? 'Paused' : 'Active'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsQueueExpanded(!isQueueExpanded)}
+                className={`p-1 rounded border transition cursor-pointer ${
+                  isQueueExpanded
+                    ? 'bg-indigo-600 border-indigo-500 text-white'
+                    : 'bg-[#1e2230] border-[#2e354a] text-gray-400 hover:text-white'
+                }`}
+                title={isQueueExpanded ? 'Switch to Compact View' : 'Switch to Detailed Expanded View'}
+              >
+                {isQueueExpanded ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
+              </button>
+
+              {queue.length > 0 && (
                 <button
-                  onClick={() => store.clearQueue()}
-                  className="p-1 text-gray-400 hover:text-rose-400 rounded cursor-pointer"
-                  title="Clear Queue"
+                  type="button"
+                  onClick={() => store.clearQueue && store.clearQueue()}
+                  className="p-1 text-gray-400 hover:text-rose-400 rounded cursor-pointer transition"
+                  title="Clear all waiting jobs"
                 >
-                  <Trash2 className="w-3 h-3" />
+                  <Trash2 className="w-3.5 h-3.5" />
                 </button>
               )}
+
               <button
+                type="button"
                 onClick={() => setIsQueueOpen(false)}
-                className="p-1 text-gray-400 hover:text-white rounded cursor-pointer"
+                className="p-1 text-gray-400 hover:text-white rounded cursor-pointer transition"
                 title="Close"
               >
-                <Minimize2 className="w-3 h-3" />
+                ✕
               </button>
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-2.5 divide-y divide-[#202432] space-y-2">
-            {isGenerating || activeJob ? (
-              <div className="pb-1.5">
-                <div className="flex items-center justify-between text-[10px] font-semibold text-indigo-300 mb-1">
-                  <span className="flex items-center gap-1 font-mono">
-                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
-                    RUNNING {currentStep ? `(${currentStep}/${maxSteps})` : ''}
+          <div className="flex-1 overflow-y-auto p-2.5 divide-y divide-[#1e2230] space-y-2.5">
+            {/* Active Running Task */}
+            {(isGenerating || activeJob) && (
+              <div className="p-2.5 bg-[#161a29] border border-indigo-500/50 rounded-lg space-y-2 shadow-md">
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 font-mono text-[10px] font-bold text-indigo-300">
+                    <span className="w-2 h-2 rounded-full bg-indigo-400 animate-ping" />
+                    RUNNING ({currentStep || 0} / {activeJob?.steps || maxSteps || 28} steps)
                   </span>
-                  <button
-                    onClick={() => cancelGeneration && cancelGeneration()}
-                    className="px-1.5 py-0.5 rounded bg-rose-600/30 hover:bg-rose-600 text-rose-200 text-[9px] font-mono cursor-pointer transition"
-                  >
-                    Interrupt
-                  </button>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] font-mono font-bold text-cyan-400">{progressPercent || 0}%</span>
+                    <button
+                      type="button"
+                      onClick={cancelGeneration}
+                      className="px-2 py-0.5 rounded bg-rose-600/30 hover:bg-rose-600 text-rose-200 text-[10px] font-mono cursor-pointer transition"
+                    >
+                      Interrupt
+                    </button>
+                  </div>
                 </div>
-                <p className="text-[11px] text-gray-300 truncate font-mono">
+
+                <p
+                  className={`text-gray-200 font-mono text-[11px] select-text leading-snug ${
+                    isQueueExpanded ? 'line-clamp-4' : 'truncate'
+                  }`}
+                  title={activeJob?.prompt || store.prompt}
+                >
                   {activeJob?.prompt || store.prompt || 'Current Task'}
                 </p>
-              </div>
-            ) : null}
 
-            {queue.length === 0 && !isGenerating && !activeJob ? (
-              <div className="py-6 text-center text-gray-500 text-[11px] flex flex-col items-center justify-center gap-1">
+                <div className="flex flex-wrap items-center gap-1 font-mono text-[10px] text-gray-400 pt-0.5">
+                  <span className="px-1.5 py-0.2 rounded bg-[#0f1118] border border-indigo-500/30 text-indigo-300 truncate max-w-[190px]">
+                    📦 {activeJob?.model || store.model || 'Default Checkpoint'}
+                  </span>
+                  <span className="px-1.5 py-0.2 rounded bg-[#0f1118] border border-[#252a3a] text-cyan-300">
+                    📐 {activeJob?.width || store.width}×{activeJob?.height || store.height}
+                  </span>
+                  <span className="px-1.5 py-0.2 rounded bg-[#0f1118] border border-[#252a3a] text-amber-300">
+                    🎲 Seed: {activeJob?.seed ?? store.seed}
+                  </span>
+                </div>
+
+                <div className="w-full bg-[#0d0e14] h-1.5 rounded-full overflow-hidden">
+                  <div
+                    className="bg-linear-to-r from-indigo-500 to-cyan-400 h-full transition-all duration-100"
+                    style={{ width: `${progressPercent || 0}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Clustered Batches */}
+            {combinedBatchGroups.length === 0 ? (
+              <div className="py-8 text-center text-gray-500 text-[11px] flex flex-col items-center justify-center gap-1.5">
                 <Sparkle className="w-4 h-4 text-gray-600" />
-                <span>No jobs in queue</span>
+                <span>Queue is empty. Click <b>+ Queue</b> to batch tasks.</span>
               </div>
             ) : (
-              queue.map((item: any, idx: number) => (
-                <div key={item.id || idx} className="pt-1.5 flex items-center justify-between gap-1 text-[11px]">
-                  <div className="flex-1 min-w-0">
-                    <span className="font-mono text-amber-400 text-[10px] mr-1">#{idx + 1}</span>
-                    <span className="text-gray-300 truncate font-mono inline-block max-w-[170px] align-bottom">
-                      {item.prompt || 'Queued generation'}
-                    </span>
+              combinedBatchGroups.map((group, gIdx) => (
+                <div
+                  key={group.batchId}
+                  className="pt-2.5 pb-1 flex flex-col gap-1.5 bg-[#141620]/60 p-2 rounded-lg border border-[#232738]"
+                >
+                  <div className="flex items-center justify-between pb-1 border-b border-[#1f2334] text-[10px] font-mono">
+                    <div className="flex items-center gap-1.5 text-indigo-300 font-bold">
+                      <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" />
+                      <span>Batch #{gIdx + 1} ({group.items.length} items)</span>
+                    </div>
+
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => store.addVariationToBatch?.(group.batchId)}
+                        className="px-1.5 py-0.2 rounded bg-[#1e2232] hover:bg-indigo-600 text-indigo-200 hover:text-white border border-[#2b3145] transition cursor-pointer flex items-center gap-0.5"
+                        title="Enqueue current prompt/params into this specific batch"
+                      >
+                        <Plus className="w-2.5 h-2.5" />
+                        <span>+ Add Gen</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => store.removeBatchFromQueue?.(group.batchId)}
+                        className="p-1 text-gray-500 hover:text-rose-400 cursor-pointer"
+                        title="Delete all jobs in this batch"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
-                  {store.cancelQueuedJob && (
-                    <button
-                      onClick={() => store.cancelQueuedJob(item.id)}
-                      className="p-1 text-gray-500 hover:text-rose-400 cursor-pointer"
-                      title="Remove from queue"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  )}
+
+                  <div className="space-y-1.5 pt-1">
+                    {group.items.map((item: any, itemIdx: number) => {
+                      const globalIndex = queue.findIndex((q: any) => q.id === item.id);
+
+                      return (
+                        <div
+                          key={item.id || itemIdx}
+                          className={`flex items-start justify-between gap-2 p-1.5 rounded transition ${
+                            item.isRunning ? 'bg-indigo-950/30 border border-indigo-500/30' : 'hover:bg-[#181b28]'
+                          }`}
+                        >
+                          <div className="flex items-start gap-2 min-w-0 flex-1">
+                            <span className="font-mono text-amber-400 font-bold text-[10px] shrink-0 mt-0.5">
+                              {item.isRunning ? '▶' : `#${globalIndex !== -1 ? globalIndex + 1 : itemIdx + 1}`}
+                            </span>
+                            <div className="flex flex-col min-w-0 flex-1 gap-0.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  store.setPrompt(item.prompt);
+                                  if (item.negativePrompt) store.setNegativePrompt(item.negativePrompt);
+                                  if (item.model) store.setModel(item.model);
+                                  if (item.seed !== undefined) store.setParams({ seed: item.seed });
+                                  if (item.width && item.height) store.setParams({ width: item.width, height: item.height });
+                                  if (item.steps) store.setParams({ steps: item.steps });
+                                }}
+                                className={`text-left text-gray-300 hover:text-indigo-300 font-mono text-[11px] cursor-pointer ${
+                                  isQueueExpanded ? 'line-clamp-2' : 'truncate'
+                                }`}
+                                title="Click to load these exact parameters into workspace"
+                              >
+                                {item.prompt}
+                              </button>
+
+                              <div className="flex flex-wrap items-center gap-1 font-mono text-[9px] text-gray-500">
+                                <span>{item.model?.split('/').pop()}</span>
+                                <span>•</span>
+                                <span>{item.width}×{item.height}</span>
+                                <span>•</span>
+                                <span className="text-amber-400/90">Seed: {item.seed}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {!item.isRunning && (
+                            <div className="flex items-center gap-1 shrink-0 opacity-80 group-hover:opacity-100 transition pt-0.5">
+                              <button
+                                type="button"
+                                onClick={() => store.duplicateQueuedItem?.(item.id)}
+                                className="px-1 py-0.5 hover:bg-[#202434] text-gray-400 hover:text-cyan-300 rounded border border-transparent hover:border-[#2f3548] cursor-pointer text-[10px]"
+                                title="Duplicate with Seed +1"
+                              >
+                                <Copy className="w-2.5 h-2.5" />
+                              </button>
+
+                              {globalIndex > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => store.reorderQueue?.(globalIndex, globalIndex - 1)}
+                                  className="px-1 py-0.5 hover:bg-[#202434] text-gray-400 hover:text-white rounded cursor-pointer text-[10px]"
+                                  title="Move Up"
+                                >
+                                  ▲
+                                </button>
+                              )}
+                              {globalIndex !== -1 && globalIndex < queue.length - 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => store.reorderQueue?.(globalIndex, globalIndex + 1)}
+                                  className="px-1 py-0.5 hover:bg-[#202434] text-gray-400 hover:text-white rounded cursor-pointer text-[10px]"
+                                  title="Move Down"
+                                >
+                                  ▼
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => store.cancelQueuedJob?.(item.id)}
+                                className="p-1 text-gray-500 hover:text-rose-400 cursor-pointer transition"
+                                title="Remove from queue"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               ))
             )}
@@ -582,13 +797,13 @@ const PreviewPanel: React.FC<IDockviewPanelProps> = () => {
 };
 
 /* =========================================================================
-   2. PROMPT & PROMPT-FLOW PIPELINE PANEL (INTERACTIVE PILLS BY DEFAULT)
+   2. PROMPT & PROMPT-FLOW PIPELINE PANEL
    ========================================================================= */
 const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   const {
     prompt, negativePrompt, setPrompt, setNegativePrompt, activeMacroCategory,
     activeSubCategory, pillSearchQuery, setActiveMacroCategory, setActiveSubCategory,
-    setPillSearchQuery, settings, setActiveContextMenu
+    setPillSearchQuery, settings, updateSettings, setActiveContextMenu
   } = useAppStore();
 
   const [activeTarget, setActiveTarget] = useState<'positive' | 'negative'>('positive');
@@ -598,20 +813,16 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number; placeAbove: boolean } | null>(null);
   const [lockedStages, setLockedStages] = useState<Record<string, boolean>>({});
 
-  // Prompt View Modes (Pills View is Default, Raw Textarea is Swappable)
   const [positiveViewMode, setPositiveViewMode] = useState<'pills' | 'text'>('pills');
   const [negativeViewMode, setNegativeViewMode] = useState<'pills' | 'text'>('pills');
   const [scrollWeightEnabled, setScrollWeightEnabled] = useState(true);
 
-  // Synchronized Resizable Split & Height
   const [promptBoxHeight, setPromptBoxHeight] = useState(150);
   const [positiveWidthPercent, setPositiveWidthPercent] = useState(65);
   const promptContainerRef = useRef<HTMLDivElement>(null);
 
-  // Collapse / Full-Height Mode
   const [isTagBrowserCollapsed, setIsTagBrowserCollapsed] = useState(false);
 
-  // Interactive Prompt Pill State
   const [editingIndex, setEditingIndex] = useState<{ target: 'positive' | 'negative'; index: number } | null>(null);
   const [editingText, setEditingText] = useState('');
   const [draggedPill, setDraggedPill] = useState<{ target: 'positive' | 'negative'; index: number } | null>(null);
@@ -620,7 +831,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
   const pillClickTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Reliable Global Window Drag Handlers
   const handleVerticalResizeStart = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -827,9 +1037,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     setLockedStages((prev) => ({ ...prev, [stage]: !prev[stage] }));
   };
 
-  /* =========================================================================
-     IN-PROMPTBOX PILL INTERACTIVE LOGIC (LEFT CLICK EDIT, DOUBLE CLICK DISABLE)
-     ========================================================================= */
   const getPromptTokens = (target: 'positive' | 'negative') => {
     const text = target === 'positive' ? prompt : negativePrompt;
     return text.split(',').map((t) => t.trim()).filter(Boolean);
@@ -845,7 +1052,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     e.stopPropagation();
 
     if (pillClickTimeoutRef.current) {
-      // Double Click: Toggle disable/mute with /* ... */
       clearTimeout(pillClickTimeoutRef.current);
       pillClickTimeoutRef.current = null;
 
@@ -860,7 +1066,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
       }
       setPromptTokens(target, tokens);
     } else {
-      // Single Click: Inline text edit
       pillClickTimeoutRef.current = setTimeout(() => {
         pillClickTimeoutRef.current = null;
         setEditingIndex({ target, index });
@@ -880,7 +1085,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     setEditingIndex(null);
   };
 
-  // Mouse wheel attention weight stepper: (tag:1.05)
   const handlePillWheel = (target: 'positive' | 'negative', index: number, tokenText: string, e: React.WheelEvent) => {
     if (!scrollWeightEnabled) return;
     e.preventDefault();
@@ -889,7 +1093,8 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     const isMuted = tokenText.startsWith('/*') && tokenText.endsWith('*/');
     const clean = tokenText.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim();
     const tokens = getPromptTokens(target);
-    const delta = e.deltaY < 0 ? 0.05 : -0.05;
+    const stepIncrement = settings.tagClickWeightStep ?? 0.2;
+    const delta = e.deltaY < 0 ? stepIncrement : -stepIncrement;
 
     const match = clean.match(/^\((.*):([0-9.]+)\)$/);
     let nextWeight = 1.0;
@@ -897,9 +1102,9 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
     if (match) {
       baseTag = match[1];
-      nextWeight = Math.max(0.1, Math.min(2.0, Number((parseFloat(match[2]) + delta).toFixed(2))));
+      nextWeight = Math.max(0.1, Math.min(2.5, Number((parseFloat(match[2]) + delta).toFixed(2))));
     } else {
-      nextWeight = Math.max(0.1, Math.min(2.0, Number((1.0 + delta).toFixed(2))));
+      nextWeight = Math.max(0.1, Math.min(2.5, Number((1.0 + delta).toFixed(2))));
     }
 
     const modified = nextWeight === 1.0 ? baseTag : `(${baseTag}:${nextWeight.toFixed(2)})`;
@@ -914,6 +1119,7 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     const isMuted = tokenText.startsWith('/*') && tokenText.endsWith('*/');
     const clean = tokenText.replace(/^\/\*\s*/, '').replace(/\s*\*\/$/, '').trim();
     const tokens = getPromptTokens(target);
+    const stepIncrement = settings.tagClickWeightStep ?? 0.2;
 
     const items: ContextMenuItem[] = [
       {
@@ -924,27 +1130,27 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         }
       },
       {
-        label: `Increase Weight (+0.10)`,
+        label: `Increase Weight (+${stepIncrement.toFixed(2)})`,
         action: () => {
           const match = clean.match(/^\((.*):([0-9.]+)\)$/);
           if (match) {
-            const nextW = (parseFloat(match[2]) + 0.1).toFixed(2);
+            const nextW = (parseFloat(match[2]) + stepIncrement).toFixed(2);
             tokens[index] = `(${match[1]}:${nextW})`;
           } else {
-            tokens[index] = `(${clean}:1.10)`;
+            tokens[index] = `(${clean}:${(1.0 + stepIncrement).toFixed(2)})`;
           }
           setPromptTokens(target, tokens);
         }
       },
       {
-        label: `Decrease Weight (-0.10)`,
+        label: `Decrease Weight (-${stepIncrement.toFixed(2)})`,
         action: () => {
           const match = clean.match(/^\((.*):([0-9.]+)\)$/);
           if (match) {
-            const nextW = Math.max(0.1, parseFloat(match[2]) - 0.1).toFixed(2);
+            const nextW = Math.max(0.1, parseFloat(match[2]) - stepIncrement).toFixed(2);
             tokens[index] = `(${match[1]}:${nextW})`;
           } else {
-            tokens[index] = `(${clean}:0.90)`;
+            tokens[index] = `(${clean}:${Math.max(0.1, 1.0 - stepIncrement).toFixed(2)})`;
           }
           setPromptTokens(target, tokens);
         }
@@ -976,9 +1182,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     setActiveContextMenu({ x: e.clientX, y: e.clientY, title: `Pill: ${clean}`, items });
   };
 
-  /* =========================================================================
-     TAG SECTION (LOWER BROWSER): NON-CLIPPING SAFE POPOVER & DIRECT CLICKS
-     ========================================================================= */
   const handleBrowserPillClick = (tag: string, e: React.MouseEvent) => {
     if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
     setHoverDetail(null);
@@ -995,7 +1198,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
     if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
 
     hoverTimeoutRef.current = setTimeout(async () => {
-      // Determine if popover should sit above or below to avoid slipping under screen
       const placeAbove = rect.bottom + 180 > window.innerHeight;
       const calculatedY = placeAbove ? Math.max(10, rect.top - 190) : rect.bottom + 8;
 
@@ -1059,14 +1261,12 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 
   const totalCategoryCount = danbooru.getSubCount(activeMacroCategory, activeSubCategory);
 
-  // Render Interactive Pills View with drag reorder, inline edit, and backspace delete
   const renderPromptBoxBody = (target: 'positive' | 'negative') => {
     const isPositive = target === 'positive';
     const viewMode = isPositive ? positiveViewMode : negativeViewMode;
     const textVal = isPositive ? prompt : negativePrompt;
     const tokens = getPromptTokens(target);
 
-    // True Raw Textarea Mode
     if (viewMode === 'text') {
       return (
         <PromptAutosuggestTextarea
@@ -1078,7 +1278,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
       );
     }
 
-    // Default Interactive Pills View
     return (
       <div className="flex-1 flex flex-wrap content-start gap-1 p-1.5 overflow-y-auto bg-[#10121a] rounded border border-[#1e2230] select-none min-h-[60px]">
         {tokens.map((token, idx) => {
@@ -1133,7 +1332,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
           );
         })}
 
-        {/* Inline Adder Input with Backspace Removal */}
         <input
           type="text"
           placeholder="+ Add tag..."
@@ -1148,7 +1346,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                 setNewTagInput({ ...newTagInput, [target]: '' });
               }
             } else if (e.key === 'Backspace' && newTagInput[target] === '' && tokens.length > 0) {
-              // Backspace deletion on last tag
               e.preventDefault();
               const updated = [...tokens];
               updated.pop();
@@ -1166,7 +1363,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
       className="h-full flex flex-col bg-[#0d0e12] select-none text-xs overflow-hidden"
       style={{ zoom: `${settings.sectionScales.pills}%` }}
     >
-      {/* Top Prompt Section */}
       <div className={`p-2 bg-[#12141a] flex flex-col shrink-0 gap-1.5 ${isTagBrowserCollapsed ? 'flex-1' : 'border-b border-[#232631]'}`}>
         <div
           ref={promptContainerRef}
@@ -1212,7 +1408,27 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                 </button>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 font-mono text-[10px]">
+                {positiveViewMode === 'pills' && (
+                  <div className="flex items-center bg-[#13151f] border border-[#2b3042] rounded px-1.5 py-0.5 text-gray-400 gap-1">
+                    <span className="text-[9px] text-gray-500 uppercase tracking-tight">Step:</span>
+                    <select
+                      value={settings.tagClickWeightStep ?? 0.2}
+                      onChange={(e) => updateSettings({ tagClickWeightStep: parseFloat(e.target.value) })}
+                      className="bg-transparent text-indigo-400 hover:text-indigo-300 font-mono text-[10px] outline-none cursor-pointer"
+                      title="Scroll & Click weight step increment"
+                    >
+                      <option value={0.01} className="bg-[#181a22] text-gray-200">±0.01</option>
+                      <option value={0.02} className="bg-[#181a22] text-gray-200">±0.02</option>
+                      <option value={0.05} className="bg-[#181a22] text-gray-200">±0.05</option>
+                      <option value={0.10} className="bg-[#181a22] text-gray-200">±0.10</option>
+                      <option value={0.15} className="bg-[#181a22] text-gray-200">±0.15</option>
+                      <option value={0.20} className="bg-[#181a22] text-gray-200">±0.20</option>
+                      <option value={0.25} className="bg-[#181a22] text-gray-200">±0.25</option>
+                    </select>
+                  </div>
+                )}
+
                 {positiveViewMode === 'pills' && (
                   <button
                     type="button"
@@ -1220,8 +1436,8 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
                       e.stopPropagation();
                       setScrollWeightEnabled(!scrollWeightEnabled);
                     }}
-                    className={`text-[9px] font-mono px-1 rounded border cursor-pointer ${
-                      scrollWeightEnabled ? 'text-emerald-400 border-emerald-500/30 bg-emerald-950/40' : 'text-gray-500 border-gray-700 bg-black/40'
+                    className={`text-[9px] font-mono px-1.5 py-0.5 rounded border cursor-pointer transition ${
+                      scrollWeightEnabled ? 'text-emerald-400 border-emerald-500/40 bg-emerald-950/40' : 'text-gray-500 border-gray-700 bg-black/40'
                     }`}
                     title="Enable/Disable mouse wheel weight adjustments"
                   >
@@ -1236,7 +1452,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             </div>
           </div>
 
-          {/* Horizontal Split Divider */}
           <div
             onMouseDown={handleHorizontalSplitStart}
             className="w-1.5 bg-[#181b26] hover:bg-indigo-500 active:bg-indigo-400 cursor-col-resize rounded-full transition-colors shrink-0"
@@ -1290,7 +1505,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
           </div>
         </div>
 
-        {/* Quick Operators & Expand/Collapse Toggle */}
         <div className="flex items-center justify-between pt-0.5 shrink-0">
           <div className="flex items-center gap-1 flex-wrap">
             <span className="text-[10px] font-mono text-gray-500 mr-1">Insert:</span>
@@ -1341,7 +1555,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
           </button>
         </div>
 
-        {/* Vertical Resize Separator */}
         {!isTagBrowserCollapsed && (
           <div
             onMouseDown={handleVerticalResizeStart}
@@ -1353,7 +1566,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         )}
       </div>
 
-      {/* Real-time Conflict Linter Banner */}
       {detectedConflicts.length > 0 && (
         <div className="mx-2 mt-2 px-2.5 py-1 bg-amber-950/40 border border-amber-600/50 rounded flex items-center justify-between text-[11px] text-amber-300 shrink-0">
           <div className="flex items-center gap-1.5">
@@ -1380,7 +1592,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         </div>
       )}
 
-      {/* Suggested Next Tags */}
       {suggestedNextTags.length > 0 && (
         <div className="mx-2 mt-2 flex items-center gap-1.5 overflow-x-auto scrollbar-none py-0.5 shrink-0">
           <span className="text-[10px] font-mono text-cyan-400 flex items-center gap-0.5 shrink-0 font-semibold">
@@ -1398,10 +1609,8 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         </div>
       )}
 
-      {/* Lower Tag Browser */}
       {!isTagBrowserCollapsed && (
         <div className="flex-1 flex flex-col min-h-0 bg-[#0c0d12] mt-2">
-          {/* Tier 1: Macro Categories */}
           <div className="flex items-center bg-[#111318] border-b border-[#20232c] px-1">
             <button
               onClick={() => parentScrollRef.current && (parentScrollRef.current.scrollLeft -= 220)}
@@ -1451,7 +1660,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             </button>
           </div>
 
-          {/* Tier 2: Subcategories */}
           <div className="flex items-center gap-2 p-1.5 border-b border-[#20232c] bg-[#13151b]">
             <div className="relative w-44 shrink-0">
               <Search className="w-3 h-3 absolute left-2 top-2 text-gray-400" />
@@ -1542,7 +1750,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
             </button>
           </div>
 
-          {/* Tier 3: Tags Grid */}
           <div className="flex-1 p-2 overflow-y-auto content-start flex flex-wrap gap-1.5 bg-[#0a0b0e]">
             {currentTags.length === 0 ? (
               <span className="text-gray-600 m-auto text-xs">
@@ -1589,7 +1796,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
         </div>
       )}
 
-      {/* Popover Definition Card: Non-Blocking Pointer Events with Smart Inversion */}
       {hoverDetail && tooltipPos && (
         <div
           className="fixed z-50 w-72 bg-[#15161d] border border-[#2c303f] rounded-lg shadow-2xl p-3 text-xs text-gray-200 pointer-events-none"
@@ -1626,9 +1832,6 @@ const PromptPillsPanel: React.FC<IDockviewPanelProps> = () => {
 /* =========================================================================
    3. EXTRA NETWORKS
    ========================================================================= */
-/* =========================================================================
-   3. EXTRA NETWORKS (WITH PAGINATION & WILDCARDS LOAD LIMIT)
-   ========================================================================= */
 const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
   const {
     modelsList, lorasList, embeddingsList, wildcardsList, loadAssets,
@@ -1640,7 +1843,6 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
   const [search, setSearch] = useState('');
   const [weight, setWeight] = useState(settings.defaultLoraWeight || 1.0);
 
-  // Performance limiter (prevents 2,700+ wildcards from lagging the DOM)
   const [displayLimit, setDisplayLimit] = useState(100);
 
   const [showCivitaiModal, setShowCivitaiModal] = useState(false);
@@ -1870,7 +2072,6 @@ const ExtraNetworksPanel: React.FC<IDockviewPanelProps> = () => {
           </div>
         ))}
 
-        {/* Load More Pagination for large asset libraries like Wildcards */}
         {filtered.length > displayLimit && (
           <div className="col-span-full py-3 flex justify-center items-center gap-2">
             <button
@@ -2050,12 +2251,18 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
   const toggleFavorite = useAppStore((s) => s.toggleFavorite);
 
   const sessionHistory = useMemo(() => {
-    return history
+    const filtered = history
       .filter((item: any) => {
         const itemTime = item.timestamp || Number(item.id.split('-')[1]) || 0;
-        return itemTime === 0 || itemTime >= sessionStartTime - 5000;
+        return itemTime === 0 || itemTime >= sessionStartTime - 3600000;
       })
       .filter((item) => (!showFavoritesOnly ? true : item.isFavorite));
+
+    if (filtered.length === 0 && history.length > 0 && !showFavoritesOnly) {
+      return history.slice(0, 50);
+    }
+
+    return filtered;
   }, [history, sessionStartTime, showFavoritesOnly]);
 
   const batchedHistory = useMemo(() => {
@@ -2067,7 +2274,7 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
     const batchMap = new Map<string, typeof sessionHistory>();
 
     sessionHistory.forEach((item) => {
-      const bId = item.batchId || `time-${Math.floor((item.timestamp || 0) / 2500)}`;
+      const bId = item.batchId || `batch-${Math.floor((item.timestamp || 0) / 2500)}`;
       if (!batchMap.has(bId)) {
         const list: typeof sessionHistory = [];
         batchMap.set(bId, list);
@@ -2289,10 +2496,10 @@ const HistoryPanel: React.FC<IDockviewPanelProps> = () => {
 };
 
 /* =========================================================================
-   NEW GALLERY PANEL (UNCAPPED CAPACITY + SERVER OUTPUT SYNC)
+   NEW GALLERY PANEL (PERSISTENT ACROSS LAUNCHES)
    ========================================================================= */
 const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
-  const { history, setParams, useGenerationParams, setComparisonImage, deleteHistoryItem, setActiveContextMenu, syncServerGallery } = useAppStore();
+  const { galleryHistory, setParams, useGenerationParams, setComparisonImage, deleteHistoryItem, setActiveContextMenu, syncServerGallery } = useAppStore();
   const [viewMode, setViewMode] = useState<'cards' | 'list'>('cards');
 
   const [selectedMetaItem, setSelectedMetaItem] = useState<HistoryItem | null>(null);
@@ -2300,9 +2507,9 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
   const [isSyncingServer, setIsSyncingServer] = useState(false);
   const toggleFavorite = useAppStore((s) => s.toggleFavorite);
 
-  const filteredHistory = useMemo(() => {
-    return history.filter((item) => (!showFavoritesOnly ? true : item.isFavorite));
-  }, [history, showFavoritesOnly]);
+  const filteredGallery = useMemo(() => {
+    return (galleryHistory || []).filter((item) => (!showFavoritesOnly ? true : item.isFavorite));
+  }, [galleryHistory, showFavoritesOnly]);
 
   const handleGalleryContextMenu = (e: React.MouseEvent, item: HistoryItem) => {
     e.preventDefault();
@@ -2351,7 +2558,7 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
     <div className="h-full p-3 bg-[#121418] flex flex-col gap-2.5 overflow-hidden select-none text-xs">
       <div className="flex items-center justify-between border-b border-[#252a35] pb-1.5">
         <span className="font-semibold text-gray-300 flex items-center gap-1">
-          <ImageIcon className="w-3.5 h-3.5 text-purple-400" /> Full Gallery ({filteredHistory.length})
+          <ImageIcon className="w-3.5 h-3.5 text-purple-400" /> Full Gallery ({filteredGallery.length})
         </span>
         <div className="flex items-center gap-1.5">
           <button
@@ -2383,7 +2590,7 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
       </div>
 
       <div className={`flex-1 overflow-y-auto pr-1 items-start ${viewMode === 'cards' ? 'grid grid-cols-3 gap-2' : 'flex flex-col gap-2'}`}>
-        {filteredHistory.length === 0 ? (
+        {filteredGallery.length === 0 ? (
           <div className="col-span-3 text-center py-8 text-gray-500 flex flex-col items-center gap-2">
             <span>No gallery images found.</span>
             <button
@@ -2394,7 +2601,7 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
             </button>
           </div>
         ) : (
-          filteredHistory.map((item, index) => {
+          filteredGallery.map((item, index) => {
             const finalImageUrl = resolveImageUrl(item.imageUrl);
             return (
               <div
@@ -2419,7 +2626,7 @@ const GalleryPanel: React.FC<IDockviewPanelProps> = () => {
                     className="absolute top-1 right-1 p-1 rounded-full bg-black/60 hover:bg-black/80 text-gray-400 hover:text-amber-400 transition cursor-pointer z-10"
                     title={item.isFavorite ? 'Remove from favorites' : 'Star as favorite'}
                   >
-                    <Star className={`w-3 h-3 ${item.isFavorite ? 'fill-amber-400 text-amber-400' : ''}`} />
+                    <Star className={`w-3.5 h-3.5 ${item.isFavorite ? 'fill-amber-400 text-amber-400' : ''}`} />
                   </button>
                 </div>
                 <div className="flex-1 flex flex-col overflow-hidden">
@@ -2868,7 +3075,15 @@ const components = {
   adetailer: ADetailerPanel,
   history: HistoryPanel,
   gallery: GalleryPanel,
-  imagesearch: ImageSearchPanel
+  imagesearch: ImageSearchPanel,
+  scenestager: VisualSceneStager,
+  latentsynthesizer: LatentSynthesizer,
+  characterdossier: CharacterDossier,
+  artdirector: ArtDirectorCopilot,
+  morphscheduler: PromptMorphScheduler,
+  tagsynergy: TagSynergyEngine,
+  wildcardslot: WildcardSlotMachine,
+  tagrarity: TagRarityInspector,
 };
 
 export const Workspace: React.FC = () => {
@@ -2896,7 +3111,6 @@ export const Workspace: React.FC = () => {
   const [showConsole, setShowConsole] = useState(false);
   const [consoleLogs, setConsoleLogs] = useState<Array<{ time: string; type: 'log' | 'warn' | 'error'; msg: string }>>([]);
 
-  // Mobile navigation active tab
   const [mobileActiveTab, setMobileActiveTab] = useState<'canvas' | 'prompts' | 'params' | 'history'>('canvas');
 
   useEffect(() => {
@@ -2973,13 +3187,13 @@ export const Workspace: React.FC = () => {
   const onReady = (event: DockviewReadyEvent) => {
     setDockApi(event.api);
 
-    if (settings.autoSaveLayout) {
-      const savedLayout = localStorage.getItem('swarm_dockview_layout');
-      if (savedLayout) {
-        try {
-          event.api.fromJSON(JSON.parse(savedLayout));
-          return;
-        } catch {}
+    const savedLayout = localStorage.getItem('swarm_dockview_layout');
+    if (savedLayout && settings.autoSaveLayout) {
+      try {
+        event.api.fromJSON(JSON.parse(savedLayout));
+        return;
+      } catch (e) {
+        console.warn('Could not restore dockview layout from cache:', e);
       }
     }
 
@@ -3015,14 +3229,21 @@ export const Workspace: React.FC = () => {
 
   useEffect(() => {
     if (!dockApi) return;
-    const disposable = dockApi.onDidLayoutChange(() => {
+    const saveLayout = () => {
       if (settings.autoSaveLayout) {
         try {
           localStorage.setItem('swarm_dockview_layout', JSON.stringify(dockApi.toJSON()));
         } catch {}
       }
-    });
-    return () => disposable.dispose();
+    };
+
+    const disposable = dockApi.onDidLayoutChange(saveLayout);
+    window.addEventListener('beforeunload', saveLayout);
+
+    return () => {
+      disposable.dispose();
+      window.removeEventListener('beforeunload', saveLayout);
+    };
   }, [dockApi, settings.autoSaveLayout]);
 
   const addPanel = (type: string, title: string) => {
@@ -3182,6 +3403,34 @@ export const Workspace: React.FC = () => {
                   <button onClick={() => addPanel('preview', 'Viewport')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white cursor-pointer">
                     Viewport
                   </button>
+                  <div className="h-px bg-[#252a35] my-1" />
+                  <span className="px-3 py-1 text-[10px] font-mono text-gray-500 uppercase tracking-wider font-semibold">
+                    Companions
+                  </span>
+                  <button onClick={() => addPanel('scenestager', 'Scene Stager')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <Move className="w-3.5 h-3.5 text-cyan-400" /> Visual Scene Stager
+                  </button>
+                  <button onClick={() => addPanel('latentsynthesizer', 'Synthesizer')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <Sliders className="w-3.5 h-3.5 text-purple-400" /> Latent Synthesizer
+                  </button>
+                  <button onClick={() => addPanel('characterdossier', 'Character Dossier')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <BookOpen className="w-3.5 h-3.5 text-amber-400" /> Character Dossier
+                  </button>
+                  <button onClick={() => addPanel('artdirector', 'Art Director')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <Sparkles className="w-3.5 h-3.5 text-rose-400" /> Art Director Co-Pilot
+                  </button>
+                  <button onClick={() => addPanel('morphscheduler', 'Step Scheduler')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <Clock className="w-3.5 h-3.5 text-cyan-400" /> Prompt Morph Scheduler
+                  </button>
+                  <button onClick={() => addPanel('tagsynergy', 'Tag Synergy')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <Zap className="w-3.5 h-3.5 text-emerald-400" /> Tag Synergy Engine
+                  </button>
+                  <button onClick={() => addPanel('wildcardslot', 'Wildcard Slots')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <Dices className="w-3.5 h-3.5 text-amber-400" /> Wildcard Slot Machine
+                  </button>
+                  <button onClick={() => addPanel('tagrarity', 'Tag Rarity')} className="px-3 py-1.5 text-left hover:bg-indigo-600 hover:text-white flex items-center gap-2 cursor-pointer">
+                    <BarChart3 className="w-3.5 h-3.5 text-fuchsia-400" /> Tag Frequency Inspector
+                  </button>
                 </div>
               )}
             </div>
@@ -3201,13 +3450,12 @@ export const Workspace: React.FC = () => {
         </div>
       )}
 
-      {/* Main Grid (Desktop Dockview vs Mobile Full View) */}
+      {/* Main Grid */}
       <div className="flex-1 w-full min-h-0 relative">
         <div className="hidden md:block w-full h-full">
           <DockviewReact components={components} onReady={onReady} className="dockview-theme-dark h-full w-full" />
         </div>
 
-        {/* Mobile Fullscreen Panel Routing */}
         <div className="md:hidden w-full h-full pb-14 overflow-hidden">
           {mobileActiveTab === 'canvas' && <PreviewPanel api={{} as any} containerApi={{} as any} params={{}} />}
           {mobileActiveTab === 'prompts' && <PromptPillsPanel api={{} as any} containerApi={{} as any} params={{}} />}
@@ -3216,7 +3464,7 @@ export const Workspace: React.FC = () => {
         </div>
       </div>
 
-      {/* Bottom Tray (Desktop Only) */}
+      {/* Bottom Tray */}
       <div className="hidden md:flex relative shrink-0 flex-col bg-[#0f1115] border-t border-[#252a35]">
         <button
           type="button"
@@ -3234,7 +3482,7 @@ export const Workspace: React.FC = () => {
         )}
       </div>
 
-      {/* Mobile Bottom Navigation Bar (< 768px Phones) */}
+      {/* Mobile Bottom Navigation Bar */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 h-14 bg-[#11131a] border-t border-[#252a38] flex items-center justify-around z-50 text-[10px] font-medium text-gray-400">
         <button
           type="button"
@@ -3252,7 +3500,6 @@ export const Workspace: React.FC = () => {
           <Sparkle className="w-4 h-4" />
           <span>Prompts</span>
         </button>
-        {/* Quick Phone Generation Button */}
         <button
           type="button"
           onClick={isGenerating ? cancelGeneration : enqueueAndProcess}
@@ -3289,7 +3536,6 @@ export const Workspace: React.FC = () => {
               <button onClick={() => setShowSettingsModal(false)} className="text-gray-500 hover:text-white text-base">✕</button>
             </div>
 
-            {/* Categorization Engine Selection */}
             <div className="flex flex-col gap-2 p-2.5 bg-[#12141c] border border-indigo-500/30 rounded">
               <span className="font-semibold text-indigo-300">Categorization Engine</span>
 
@@ -3326,7 +3572,6 @@ export const Workspace: React.FC = () => {
               </div>
             </div>
 
-            {/* Audio Notifications */}
             <div className="flex flex-col gap-2 border-t border-[#252a38] pt-2">
               <span className="font-mono text-[10px] text-gray-400 uppercase tracking-wider font-semibold">
                 Audio Notifications
@@ -3465,17 +3710,19 @@ export const Workspace: React.FC = () => {
               </label>
 
               <div className="flex items-center justify-between p-2 bg-[#12141c] border border-[#252938] rounded">
-                <span>Shift-Click weight increment step</span>
+                <span>Tag Click & Scroll Weight Increment Step</span>
                 <select
                   value={settings.tagClickWeightStep}
                   onChange={(e) => updateSettings({ tagClickWeightStep: Number(e.target.value) })}
-                  className="bg-[#1a1d28] border border-[#2e3346] rounded px-2 py-0.5 text-xs text-gray-200 outline-none"
+                  className="bg-[#1a1d28] border border-[#2e3346] rounded px-2 py-0.5 text-xs text-gray-200 outline-none cursor-pointer font-mono"
                 >
-                  <option value="0.05">+0.05</option>
-                  <option value="0.10">+0.10</option>
-                  <option value="0.15">+0.15</option>
-                  <option value="0.20">+0.20 (Default)</option>
-                  <option value="0.25">+0.25</option>
+                  <option value={0.01}>±0.01</option>
+                  <option value={0.02}>±0.02</option>
+                  <option value={0.05}>±0.05</option>
+                  <option value={0.10}>±0.10</option>
+                  <option value={0.15}>±0.15</option>
+                  <option value={0.20}>±0.20 (Default)</option>
+                  <option value={0.25}>±0.25</option>
                 </select>
               </div>
             </div>
@@ -3519,8 +3766,8 @@ export const Workspace: React.FC = () => {
                 <input
                   type="number"
                   min="10"
-                  max="200"
-                  step="10"
+                  max="5000"
+                  step="50"
                   value={settings.maxHistoryCount}
                   onChange={(e) => updateSettings({ maxHistoryCount: Number(e.target.value) })}
                   className="w-16 bg-[#1a1d28] border border-[#2e3346] rounded px-2 py-0.5 text-xs text-gray-200 font-mono outline-none"
